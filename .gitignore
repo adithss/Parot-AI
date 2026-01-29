@@ -37,3 +37,8 @@ __pycache__/
 
 # VS Code
 .vscode/
+
+.env
+.env.*
+backend/.env
+backend/.env.*
