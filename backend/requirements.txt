@@ -1,0 +1,12 @@
+fastapi==0.104.1
+uvicorn==0.24.0
+python-dotenv==1.0.0
+google-generativeai
+faster-whisper
+torch
+torchaudio
+soundfile
+pydub
+numpy==1.26.4
+pydantic
+# Skip pyannote.audio for now - we'll add it manually

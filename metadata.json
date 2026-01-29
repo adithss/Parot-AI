@@ -1,0 +1,7 @@
+{
+  "name": "Parot ",
+  "description": "A real-time meeting intelligence platform that transcribes conversations, provides context-aware summaries, and offers sentiment insights using the Gemini API.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
