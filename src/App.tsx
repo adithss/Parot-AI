@@ -1,4 +1,3 @@
-#
 import React, { useState, useEffect } from "react";
 import {
   MeetingState,
@@ -32,12 +31,12 @@ type AppView = "landing" | "signup" | "login" | "dashboard";
 const App: React.FC = () => {
   const [currentView, setCurrentView] = useState<AppView>("dashboard");
   const [meetingState, setMeetingState] = useState<MeetingState>(
-    MeetingState.IDLE
+    MeetingState.IDLE,
   );
   const [error, setError] = useState<string | null>(null);
 
   const [activeAnalysis, setActiveAnalysis] = useState<AnalysisResult | null>(
-    null
+    null,
   );
   const [meetingHistory, setMeetingHistory] = useState<
     AnalysisResultWithMeta[]
@@ -134,7 +133,7 @@ const App: React.FC = () => {
 
       if (!transcript.trim()) {
         setError(
-          "No transcription generated. Please ensure your microphone was working and you spoke clearly."
+          "No transcription generated. Please ensure your microphone was working and you spoke clearly.",
         );
         setMeetingState(MeetingState.ERROR);
         return;
@@ -174,7 +173,7 @@ const App: React.FC = () => {
   };
 
   const handleFileUpload = async (
-    event: React.ChangeEvent<HTMLInputElement>
+    event: React.ChangeEvent<HTMLInputElement>,
   ) => {
     if (!event.target.files || event.target.files.length === 0) return;
     const file = event.target.files[0];
@@ -203,7 +202,7 @@ const App: React.FC = () => {
 
         if (!transcript.trim()) {
           setError(
-            "No transcription generated. Please ensure the audio file contains speech."
+            "No transcription generated. Please ensure the audio file contains speech.",
           );
           setMeetingState(MeetingState.ERROR);
           return;
