@@ -147,9 +147,19 @@ export const queryMeetingContext = async (
   question: string,
 ): Promise<string> => {
   try {
+    // Format transcript - handle both array and string formats
+    let transcriptText = "";
+    if (Array.isArray(meetingResult.diarizedTranscript)) {
+      transcriptText = formatTranscriptForContext(
+        meetingResult.diarizedTranscript,
+      );
+    } else if (typeof meetingResult.diarizedTranscript === "string") {
+      transcriptText = meetingResult.diarizedTranscript;
+    }
+
     // Prepare the context payload with meeting information
     const contextPayload = {
-      transcript: formatTranscriptForContext(meetingResult.diarizedTranscript),
+      transcript: transcriptText,
       summary: meetingResult.summary,
       sentiment: meetingResult.sentiment,
       emotionAnalysis: meetingResult.emotionAnalysis,
@@ -244,5 +254,63 @@ export const translateContent = async (
       throw error;
     }
     throw new Error("Failed to translate content. Please try again.");
+  }
+};
+
+/**
+ * Process complete real-time audio after large transcription is ready
+ * This sends the recorded audio to backend for diarization and analysis
+ */
+export const processRealtimeComplete = async (
+  audioBlob: Blob,
+): Promise<any> => {
+  try {
+    // Convert blob to base64
+    const base64Audio = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const base64String = (reader.result as string).split(",")[1];
+        resolve(base64String);
+      };
+      reader.onerror = () => {
+        reject(new Error("Failed to convert audio to base64"));
+      };
+      reader.readAsDataURL(audioBlob);
+    });
+
+    const response = await fetch(
+      `${API_BASE_URL}/api/process-realtime-complete`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          audio_base64: base64Audio,
+          mime_type: audioBlob.type,
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(
+        errorData.detail || `Processing failed: ${response.statusText}`,
+      );
+    }
+
+    const data = await response.json();
+
+    if (!data.success || !data.analysis) {
+      throw new Error("Invalid response from processing service");
+    }
+
+    return data.analysis;
+  } catch (error) {
+    console.error("Real-time complete processing error:", error);
+    if (error instanceof Error) {
+      throw error;
+    }
+    throw new Error("Failed to process real-time audio. Please try again.");
   }
 };

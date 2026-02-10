@@ -47,6 +47,10 @@ class QueryContextRequest(BaseModel):
     keyDecisions: list
     question: str
 
+class ProcessRealtimeCompleteRequest(BaseModel):
+    audio_base64: str
+    mime_type: str
+
 @app.get("/")
 async def root():
     return {"message": "Parot Transcription API is running"}
@@ -145,10 +149,40 @@ async def analyze_endpoint(request: AnalyzeRequest):
         
         logger.info("Analysis complete")
         
-        # Return the analysis result directly (it's already a structured dict)
+        # Parse the transcript into diarized segments if it's a string with speaker labels
+        # Format: "Speaker 1: text\n\nSpeaker 2: text"
+        diarized_segments = []
+        if isinstance(transcript, str) and ":" in transcript:
+            # Split by double newlines to get speaker segments
+            segments = transcript.split("\n\n")
+            for segment in segments:
+                segment = segment.strip()
+                if ":" in segment:
+                    parts = segment.split(":", 1)
+                    if len(parts) == 2:
+                        diarized_segments.append({
+                            "speaker": parts[0].strip(),
+                            "text": parts[1].strip()
+                        })
+        
+        # If no segments were parsed, create a default one
+        if not diarized_segments:
+            diarized_segments = [{"speaker": "Speaker", "text": transcript}]
+        
+        # Return the analysis result with diarizedTranscript as array
         return JSONResponse({
             "success": True,
-            "analysis": analysis_result
+            "analysis": {
+                "diarizedTranscript": diarized_segments,
+                "summary": analysis_result.get("summary", ""),
+                "sentiment": analysis_result.get("sentiment", {
+                    "overall": "Neutral",
+                    "highlights": []
+                }),
+                "emotionAnalysis": analysis_result.get("emotionAnalysis", []),
+                "actionItems": analysis_result.get("actionItems", []),
+                "keyDecisions": analysis_result.get("keyDecisions", [])
+            }
         })
         
     except Exception as e:
@@ -192,6 +226,135 @@ async def query_context_endpoint(request: QueryContextRequest):
     except Exception as e:
         logger.error(f"Error during context query: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Context query failed: {str(e)}")
+
+@app.post("/api/process-realtime-complete")
+async def process_realtime_complete_endpoint(request: ProcessRealtimeCompleteRequest):
+    """
+    Process complete real-time audio after recording finishes.
+    Receives audio as base64, runs diarization and Gemini analysis.
+    Same flow as /api/transcribe + /api/analyze but combined.
+    """
+    temp_file_path = None
+    
+    try:
+        logger.info(f"Received real-time audio data, mime_type: {request.mime_type}")
+        
+        # Decode Base64 audio
+        try:
+            audio_data = base64.b64decode(request.audio_base64)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid Base64 data: {str(e)}")
+        
+        # Determine file extension from MIME type
+        mime_to_ext = {
+            "audio/mpeg": ".mp3",
+            "audio/mp3": ".mp3",
+            "audio/wav": ".wav",
+            "audio/x-wav": ".wav",
+            "audio/webm": ".webm",
+            "audio/ogg": ".ogg",
+        }
+        suffix = mime_to_ext.get(request.mime_type, ".wav")
+        
+        # Create a temporary file to store the audio
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+            temp_file.write(audio_data)
+            temp_file_path = temp_file.name
+        
+        logger.info(f"Saved temporary file: {temp_file_path}")
+        
+        # Step 1: Transcribe audio using Faster Whisper
+        logger.info("Starting transcription for real-time audio...")
+        transcription_result = transcribe_audio(temp_file_path)
+        
+        if not transcription_result or len(transcription_result) == 0:
+            raise Exception("No transcription generated. The audio file may be empty or contain no speech.")
+        
+        # Step 2: Diarize audio using Pyannote
+        logger.info("Starting diarization for real-time audio...")
+        diarization_result = diarize_audio(temp_file_path)
+        
+        # Step 3: Combine transcription with diarization
+        logger.info("Combining transcription with diarization...")
+        combined_transcript = combine_transcription_and_diarization(
+            transcription_result,
+            diarization_result
+        )
+        
+        # Step 4: Analyze the transcript using Gemini
+        logger.info("Starting Gemini analysis for real-time audio...")
+        analysis_result = analyze_transcript(combined_transcript)
+        
+        logger.info("Real-time audio processing complete")
+        
+        # Format diarization result for frontend
+        diarized_segments = []
+        current_speaker = None
+        current_text = []
+        
+        for segment in diarization_result:
+            speaker = segment["speaker"]
+            
+            # Find corresponding transcription text for this time segment
+            segment_texts = []
+            for trans_seg in transcription_result:
+                # Check if transcription segment overlaps with diarization segment
+                if (trans_seg["start"] < segment["end"] and 
+                    trans_seg["end"] > segment["start"]):
+                    segment_texts.append(trans_seg["text"])
+            
+            segment_text = " ".join(segment_texts).strip()
+            
+            if segment_text:
+                # Group consecutive segments from same speaker
+                if speaker == current_speaker:
+                    current_text.append(segment_text)
+                else:
+                    # Save previous speaker's text
+                    if current_speaker and current_text:
+                        diarized_segments.append({
+                            "speaker": current_speaker,
+                            "text": " ".join(current_text)
+                        })
+                    # Start new speaker
+                    current_speaker = speaker
+                    current_text = [segment_text]
+        
+        # Add the last speaker's text
+        if current_speaker and current_text:
+            diarized_segments.append({
+                "speaker": current_speaker,
+                "text": " ".join(current_text)
+            })
+        
+        # Return complete analysis in the same format as audio upload
+        return JSONResponse({
+            "success": True,
+            "analysis": {
+                "diarizedTranscript": diarized_segments,
+                "summary": analysis_result.get("summary", ""),
+                "sentiment": analysis_result.get("sentiment", {
+                    "overall": "Neutral",
+                    "highlights": []
+                }),
+                "emotionAnalysis": analysis_result.get("emotionAnalysis", []),
+                "actionItems": analysis_result.get("actionItems", []),
+                "keyDecisions": analysis_result.get("keyDecisions", [])
+            }
+        })
+            
+    except Exception as e:
+        logger.error(f"Error during real-time complete processing: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Real-time processing failed: {str(e)}")
+        
+    finally:
+        # Clean up temporary file
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.unlink(temp_file_path)
+                logger.info(f"Cleaned up temporary file: {temp_file_path}")
+            except Exception as e:
+                logger.error(f"Failed to delete temporary file: {str(e)}")
 
 def combine_transcription_and_diarization(transcription_segments, diarization_segments):
     """
