@@ -36,6 +36,7 @@ import MeetingAnalysis from "./components/MeetingAnalysis";
 import LandingPage from "./components/LandingPage";
 import SignupPage from "./components/SignupPage";
 import LoginPage from "./components/LoginPage";
+import Spectrogram from "./components/Spectrogram";
 
 type AppView = "landing" | "signup" | "login" | "dashboard" | "realtime";
 
@@ -61,6 +62,9 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
 
   const [activeAnalysis, setActiveAnalysis] = useState<AnalysisResult | null>(
+    null,
+  );
+  const [activeAudioFile, setActiveAudioFile] = useState<File | Blob | null>(
     null,
   );
   const [meetingHistory, setMeetingHistory] = useState<
@@ -212,6 +216,7 @@ const App: React.FC = () => {
 
   const handleCloseAnalysis = () => {
     setActiveAnalysis(null);
+    setActiveAudioFile(null);
     setMeetingState(MeetingState.IDLE);
     setError(null);
   };
@@ -255,6 +260,9 @@ const App: React.FC = () => {
     if (!event.target.files || event.target.files.length === 0) return;
     const file = event.target.files[0];
 
+    // Store file so MeetingAnalysis can show spectrogram
+    setActiveAudioFile(file);
+
     setMeetingState(MeetingState.PROCESSING);
     setError(null);
 
@@ -266,7 +274,11 @@ const App: React.FC = () => {
           const base64String = (reader.result as string).split(",")[1];
           const mimeType = file.type;
 
-          const transcript = await transcribeAudio(base64String, mimeType);
+          const transcriptionData = await transcribeAudio(
+            base64String,
+            mimeType,
+          );
+          const transcript = transcriptionData.transcript;
 
           const analysisResult = await analyzeTranscript(transcript);
 
@@ -284,6 +296,7 @@ const App: React.FC = () => {
             actionItems: analysisResult.actionItems || [],
             keyDecisions: analysisResult.keyDecisions || [],
             diarizedTranscript: parsedTranscript,
+            spectrogramUrl: transcriptionData.spectrogramUrl,
           };
 
           setActiveAnalysis(finalResult);
@@ -1047,6 +1060,18 @@ registerProcessor('audio-processor', AudioProcessor);
                 </div>
               )}
 
+              {/* ── Live Spectrogram ─────────────────────────────────── */}
+              <div className="w-full mt-5">
+                <Spectrogram
+                  stream={streamRef.current}
+                  isRecording={isListening}
+                  label="Live Spectrogram"
+                  colorScheme="cyan"
+                  height={140}
+                  fftSize={2048}
+                />
+              </div>
+
               <div className="flex gap-6 text-xs text-gray-500 mt-4">
                 <div className="flex items-center gap-2">
                   <Zap size={14} className="text-cyan-400" />
@@ -1195,6 +1220,7 @@ registerProcessor('audio-processor', AudioProcessor);
             <MeetingAnalysis
               result={activeAnalysis}
               onReset={handleCloseAnalysis}
+              audioFile={activeAudioFile}
             />
           )
         );

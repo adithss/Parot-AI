@@ -1,5 +1,5 @@
 // API Base URL - update this to match your backend
-const API_BASE_URL = "http://localhost:8000";
+export const API_BASE_URL = "http://localhost:8000";
 
 let mediaRecorder: MediaRecorder | null = null;
 let audioChunks: Blob[] = [];
@@ -66,7 +66,7 @@ export const stopRecording = async (): Promise<{
 export const transcribeAudio = async (
   base64Audio: string,
   mimeType: string,
-): Promise<string> => {
+): Promise<{ transcript: string; spectrogramUrl?: string }> => {
   try {
     const response = await fetch(`${API_BASE_URL}/api/transcribe`, {
       method: "POST",
@@ -92,7 +92,10 @@ export const transcribeAudio = async (
       throw new Error("Invalid response from transcription service");
     }
 
-    return data.transcript;
+    return {
+      transcript: data.transcript,
+      spectrogramUrl: data.spectrogramUrl,
+    };
   } catch (error) {
     console.error("Transcription error:", error);
     if (error instanceof Error) {
@@ -215,6 +218,41 @@ const formatTranscriptForContext = (
 };
 
 /**
+ * Map language names to language codes
+ */
+const getLanguageCode = (language: string): string => {
+  const languageMap: { [key: string]: string } = {
+    english: "en",
+    spanish: "es",
+    french: "fr",
+    german: "de",
+    italian: "it",
+    portuguese: "pt",
+    russian: "ru",
+    chinese: "zh",
+    japanese: "ja",
+    arabic: "ar",
+    hindi: "hi",
+    korean: "ko",
+    dutch: "nl",
+    polish: "pl",
+    turkish: "tr",
+    malayalam: "ml",
+  };
+
+  // Convert to lowercase for matching
+  const lowerLang = language.toLowerCase();
+
+  // If it's already a code (2 letters), return as-is
+  if (language.length === 2) {
+    return language.toLowerCase();
+  }
+
+  // Otherwise, look up the code
+  return languageMap[lowerLang] || language;
+};
+
+/**
  * Translate content to a target language
  * This function is commented out in MeetingAnalysis.tsx but included here for completeness
  */
@@ -223,14 +261,28 @@ export const translateContent = async (
   targetLanguage: string,
 ): Promise<any> => {
   try {
+    // Convert language name to code (e.g., "French" -> "fr")
+    const targetLanguageCode = getLanguageCode(targetLanguage);
+
+    // Prepare content to translate
+    const contentToTranslate = {
+      summary: result.summary,
+      actionItems: result.actionItems,
+      keyDecisions: result.keyDecisions,
+      diarizedTranscript: result.diarizedTranscript,
+      sentiment: result.sentiment,
+      emotionAnalysis: result.emotionAnalysis,
+    };
+
     const response = await fetch(`${API_BASE_URL}/api/translate`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        content: result,
-        target_language: targetLanguage,
+        content: contentToTranslate,
+        target_language: targetLanguageCode,
+        source_language: "en", // Always translate from English
       }),
     });
 
@@ -305,7 +357,10 @@ export const processRealtimeComplete = async (
       throw new Error("Invalid response from processing service");
     }
 
-    return data.analysis;
+    return {
+      ...data.analysis,
+      spectrogramUrl: data.spectrogramUrl,
+    };
   } catch (error) {
     console.error("Real-time complete processing error:", error);
     if (error instanceof Error) {

@@ -1,17 +1,19 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import tempfile
 import os
 import base64
 from pathlib import Path
 import logging
-
+from translation_service import translate_meeting_content, get_available_languages
 from transcription_service import transcribe_audio
 from diarization_service import diarize_audio
 from analysis_service import analyze_transcript
 from chat_service import query_meeting_context
+from spectrogram_service import create_spectrogram_image, cleanup_old_spectrograms
 
 # Configure logging
 logging.basicConfig(
@@ -21,6 +23,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Parot Transcription API")
+
+# Mount static files directory for spectrograms
+os.makedirs("static/spectrograms", exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Clean up old spectrograms on startup
+cleanup_old_spectrograms()
 
 # Configure CORS
 app.add_middleware(
@@ -50,6 +59,10 @@ class QueryContextRequest(BaseModel):
 class ProcessRealtimeCompleteRequest(BaseModel):
     audio_base64: str
     mime_type: str
+class TranslateRequest(BaseModel):
+    content: dict
+    target_language: str
+    source_language: str = "en"  # Changed from "auto" to "en"
 
 @app.get("/")
 async def root():
@@ -112,13 +125,30 @@ async def transcribe_endpoint(request: TranscribeRequest):
             diarization_result
         )
         
+        # Step 4: Generate spectrogram image
+        logger.info("Generating spectrogram image...")
+        spectrogram_path = None
+        try:
+            spectrogram_path = create_spectrogram_image(temp_file_path)
+            logger.info(f"Spectrogram generated: {spectrogram_path}")
+        except Exception as spec_error:
+            logger.error(f"Failed to generate spectrogram: {spec_error}")
+            # Continue without spectrogram - not critical
+        
         logger.info("Transcription and diarization complete")
         
-        return JSONResponse({
+        # Build response
+        response_data = {
             "success": True,
             "transcript": combined_transcript,
             "speakers": list(set([segment["speaker"] for segment in diarization_result]))
-        })
+        }
+        
+        # Add spectrogram URL if generated
+        if spectrogram_path:
+            response_data["spectrogramUrl"] = f"/{spectrogram_path}"
+        
+        return JSONResponse(response_data)
             
     except Exception as e:
         logger.error(f"Error during transcription: {str(e)}", exc_info=True)
@@ -285,6 +315,16 @@ async def process_realtime_complete_endpoint(request: ProcessRealtimeCompleteReq
         logger.info("Starting Gemini analysis for real-time audio...")
         analysis_result = analyze_transcript(combined_transcript)
         
+        # Step 5: Generate spectrogram image
+        logger.info("Generating spectrogram image...")
+        spectrogram_path = None
+        try:
+            spectrogram_path = create_spectrogram_image(temp_file_path)
+            logger.info(f"Spectrogram generated: {spectrogram_path}")
+        except Exception as spec_error:
+            logger.error(f"Failed to generate spectrogram: {spec_error}")
+            # Continue without spectrogram - not critical
+        
         logger.info("Real-time audio processing complete")
         
         # Format diarization result for frontend
@@ -328,7 +368,7 @@ async def process_realtime_complete_endpoint(request: ProcessRealtimeCompleteReq
             })
         
         # Return complete analysis in the same format as audio upload
-        return JSONResponse({
+        response_data = {
             "success": True,
             "analysis": {
                 "diarizedTranscript": diarized_segments,
@@ -341,7 +381,14 @@ async def process_realtime_complete_endpoint(request: ProcessRealtimeCompleteReq
                 "actionItems": analysis_result.get("actionItems", []),
                 "keyDecisions": analysis_result.get("keyDecisions", [])
             }
-        })
+        }
+        
+        # Add spectrogram URL if generated
+        if spectrogram_path:
+            # Convert absolute path to URL path
+            response_data["spectrogramUrl"] = f"/{spectrogram_path}"
+        
+        return JSONResponse(response_data)
             
     except Exception as e:
         logger.error(f"Error during real-time complete processing: {str(e)}", exc_info=True)
@@ -407,6 +454,35 @@ def combine_transcription_and_diarization(transcription_segments, diarization_se
     
     return formatted_transcript.strip()
 
+@app.get("/api/languages")
+async def get_languages_endpoint():
+    """Get available translation languages"""
+    try:
+        languages = get_available_languages()
+        return JSONResponse({"success": True, "languages": languages})
+    except Exception as e:
+        logger.error(f"Error fetching languages: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch languages: {str(e)}")
+
+@app.post("/api/translate")
+async def translate_endpoint(request: TranslateRequest):
+    """Translate meeting content using LibreTranslate"""
+    try:
+        if not request.content:
+            raise HTTPException(status_code=400, detail="Content is required")
+        
+        logger.info(f"Translating content to {request.target_language}...")
+        translated_content = translate_meeting_content(
+            request.content, request.target_language, request.source_language
+        )
+        
+        return JSONResponse({"success": True, "translated_content": translated_content})
+    except Exception as e:
+        logger.error(f"Translation error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
+
+
+    
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")

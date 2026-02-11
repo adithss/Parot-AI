@@ -1,8 +1,25 @@
+# MUST be before any pyannote imports
+import huggingface_hub
+_original_hf_hub_download = huggingface_hub.hf_hub_download
+
+def _patched_hf_hub_download(*args, **kwargs):
+    if "use_auth_token" in kwargs:
+        kwargs["token"] = kwargs.pop("use_auth_token")
+    return _original_hf_hub_download(*args, **kwargs)
+
+huggingface_hub.hf_hub_download = _patched_hf_hub_download
+
+# Now safe to import pyannote
 from pyannote.audio import Pipeline
 import torch
 import logging
 import os
 from dotenv import load_dotenv
+try:
+    from huggingface_hub import login
+    HF_LOGIN_AVAILABLE = True
+except ImportError:
+    HF_LOGIN_AVAILABLE = False
 
 load_dotenv()
 
@@ -21,16 +38,17 @@ def get_pipeline():
 
     try:
         logger.info("Loading Pyannote speaker diarization pipeline...")
-        
+
         if HF_AUTH_TOKEN:
-            logger.info("HuggingFace token found in environment")
+            logger.info(f"HuggingFace token found (starts with: {HF_AUTH_TOKEN[:7]}...)")
+            if HF_LOGIN_AVAILABLE:
+                login(token=HF_AUTH_TOKEN)
+                logger.info("Logged in to HuggingFace successfully")
         else:
             logger.warning("No HuggingFace token found - this may cause authentication errors")
 
-        # Use version 3.0 pipeline which is compatible with pyannote.audio 3.0.1
         _pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.0",
-            use_auth_token=HF_AUTH_TOKEN
+            "pyannote/speaker-diarization-3.0"
         )
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

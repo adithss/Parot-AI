@@ -3,6 +3,7 @@ import { AnalysisResult, ChatMessage } from "./types";
 import {
   queryMeetingContext,
   translateContent,
+  API_BASE_URL,
 } from "../services/geminiService";
 import {
   BotMessageSquareIcon,
@@ -17,15 +18,20 @@ import {
   DownloadIcon,
   CalendarPlusIcon,
 } from "./icons";
+import Spectrogram from "./Spectrogram";
+import SpectrogramImage from "./SpectrogramImage";
 
 interface MeetingAnalysisProps {
   result: AnalysisResult;
   onReset: () => void;
+  /** Optional: original audio file so the spectrogram can replay it */
+  audioFile?: File | Blob | null;
 }
 
 const MeetingAnalysis: React.FC<MeetingAnalysisProps> = ({
   result,
   onReset,
+  audioFile = null,
 }) => {
   const [showTranscript, setShowTranscript] = useState(false);
   const [currentResult, setCurrentResult] = useState<AnalysisResult>(result);
@@ -213,6 +219,20 @@ const MeetingAnalysis: React.FC<MeetingAnalysisProps> = ({
           </ol>
         </div>
 
+        ${
+          currentResult.spectrogramUrl
+            ? `
+        <div style="margin-bottom: 30px; page-break-inside: avoid;">
+          <h2 style="font-size: 20px; font-weight: 700; color: #111827; margin-bottom: 12px; border-left: 4px solid #0891b2; padding-left: 10px;">Audio Spectrogram</h2>
+          <img src="${API_BASE_URL}${currentResult.spectrogramUrl}" alt="Audio Spectrogram" style="width: 100%; max-width: 720px; height: auto; border-radius: 8px; background: #111827; border: 1px solid #e5e7eb;" crossorigin="anonymous" />
+          <p style="text-align: center; color: #6b7280; font-size: 11px; margin-top: 8px;">
+            Y-axis = Frequency (Hz) &nbsp;·&nbsp; X-axis = Time (s) &nbsp;·&nbsp; Color = Amplitude (dB)
+          </p>
+        </div>
+        `
+            : ""
+        }
+
         <div style="margin-top: 40px; border-top: 1px solid #e5e7eb; padding-top: 20px;">
           <h2 style="font-size: 20px; font-weight: 700; color: #111827; margin-bottom: 16px;">Full Transcript</h2>
           <div style="font-size: 13px; color: #4b5563;">
@@ -230,11 +250,33 @@ const MeetingAnalysis: React.FC<MeetingAnalysisProps> = ({
         </div>
       </div>
     `;
-
     container.appendChild(element);
 
+    // If there's a spectrogram, preload it before generating PDF
+    if (currentResult.spectrogramUrl) {
+      try {
+        const spectrogramImg = element.querySelector(
+          'img[alt="Audio Spectrogram"]',
+        ) as HTMLImageElement;
+        if (spectrogramImg) {
+          await new Promise((resolve, reject) => {
+            spectrogramImg.onload = resolve;
+            spectrogramImg.onerror = reject;
+            // Trigger load if not already loaded
+            if (!spectrogramImg.complete) {
+              spectrogramImg.src = spectrogramImg.src;
+            } else {
+              resolve(null);
+            }
+          });
+        }
+      } catch (err) {
+        console.warn("Failed to preload spectrogram image:", err);
+      }
+    }
+
     // Delay to allow DOM rendering and layout calculation
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    await new Promise((resolve) => setTimeout(resolve, 1000));
 
     const w = window as any;
     if (w.html2pdf) {
@@ -463,6 +505,29 @@ const MeetingAnalysis: React.FC<MeetingAnalysisProps> = ({
           </div>
         </div>
       </div>
+
+      {/* ── Spectrogram Section ─────────────────────────────────────────── */}
+      {result.spectrogramUrl && (
+        <div className="mb-8">
+          <h3 className="flex items-center text-lg font-semibold mb-3 text-cyan-400">
+            <svg
+              className="w-5 h-5 mr-2"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path d="M2 12h1m18 0h1M6.5 7.5l-1-1M18.5 7.5l1-1M6.5 16.5l-1 1M18.5 16.5l1 1M12 4v1m0 14v1" />
+              <circle cx="12" cy="12" r="4" />
+            </svg>
+            Audio Spectrogram
+          </h3>
+          <SpectrogramImage
+            imageUrl={`${API_BASE_URL}${result.spectrogramUrl}`}
+            label="Frequency · Time · Amplitude"
+          />
+        </div>
+      )}
 
       {/* Transcript Section */}
       <div className="mb-8">

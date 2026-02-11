@@ -1,10 +1,9 @@
-
 export enum MeetingState {
-  IDLE = 'IDLE',
-  RECORDING = 'RECORDING',
-  PROCESSING = 'PROCESSING',
-  ANALYSIS_READY = 'ANALYSIS_READY',
-  ERROR = 'ERROR',
+  IDLE = "IDLE",
+  RECORDING = "RECORDING",
+  PROCESSING = "PROCESSING",
+  ANALYSIS_READY = "ANALYSIS_READY",
+  ERROR = "ERROR",
 }
 
 // NEW: For speaker diarization
@@ -15,18 +14,18 @@ export interface SpeakerSegment {
 
 // NEW: Structured transcript segment for UI
 export interface TranscriptSegment {
-    id: string;
-    speaker: string;
-    text: string;
-    timestamp: string;
-    colorId: number; // 0-3 for cycling colors
+  id: string;
+  speaker: string;
+  text: string;
+  timestamp: string;
+  colorId: number; // 0-3 for cycling colors
 }
 
 // NEW: For live session updates
 export interface StreamUpdate {
-    text: string;
-    source: 'user' | 'model';
-    isFinal: boolean;
+  text: string;
+  source: "user" | "model";
+  isFinal: boolean;
 }
 
 // UPDATED: To include more detailed analysis based on the architecture
@@ -37,18 +36,19 @@ export interface AnalysisResult {
     highlights: string[];
   };
   emotionAnalysis: {
-      emotion: string;
-      reasoning: string;
+    emotion: string;
+    reasoning: string;
   }[];
   actionItems: string[];
   keyDecisions: string[];
   diarizedTranscript: SpeakerSegment[];
+  spectrogramUrl?: string; // Optional URL to static spectrogram image
 }
 
 // NEW: For the context-aware chatbot feature
 export interface ChatMessage {
-    sender: 'user' | 'bot';
-    text: string;
+  sender: "user" | "bot";
+  text: string;
 }
 
 // NEW: For storing meetings with metadata for the history list
