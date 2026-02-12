@@ -9,6 +9,11 @@ import {
   analyzeTranscript,
   transcribeAudio,
   processRealtimeComplete,
+  logout,
+  isAuthenticated,
+  getUserMeetings,
+  getMeetingById, // ← NEW
+  deleteMeeting,
 } from "./services/geminiService";
 import {
   MicIcon,
@@ -32,6 +37,7 @@ import {
   ArrowLeft,
   MicOff,
 } from "lucide-react";
+// import apiService from "./services/apiService";
 import MeetingAnalysis from "./components/MeetingAnalysis";
 import LandingPage from "./components/LandingPage";
 import SignupPage from "./components/SignupPage";
@@ -54,8 +60,19 @@ interface TranscriptSegment {
   id: string;
 }
 
+interface MeetingFromDB {
+  id: string;
+  title: string;
+  created_at: string;
+  user_id: string;
+  audio_file_path?: string;
+  spectrogram_url?: string;
+  duration?: number;
+  status: string;
+}
 const App: React.FC = () => {
-  const [currentView, setCurrentView] = useState<AppView>("dashboard");
+  const [currentView, setCurrentView] = useState<AppView>("landing");
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [meetingState, setMeetingState] = useState<MeetingState>(
     MeetingState.IDLE,
   );
@@ -67,9 +84,9 @@ const App: React.FC = () => {
   const [activeAudioFile, setActiveAudioFile] = useState<File | Blob | null>(
     null,
   );
-  const [meetingHistory, setMeetingHistory] = useState<
-    AnalysisResultWithMeta[]
-  >([]);
+  const [meetingHistory, setMeetingHistory] = useState<MeetingFromDB[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [currentMeetingId, setCurrentMeetingId] = useState<string | null>(null);
 
   // Real-time recording states
   const [deepgramText, setDeepgramText] = useState("");
@@ -100,17 +117,14 @@ const App: React.FC = () => {
   const cumulativeMediumRef = useRef<string>("");
   const recordedAudioChunksRef = useRef<Blob[]>([]);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-
   useEffect(() => {
-    try {
-      const storedHistory = localStorage.getItem("meetingHistory");
-      if (storedHistory) {
-        setMeetingHistory(JSON.parse(storedHistory));
-      }
-    } catch (e) {
-      console.error("Failed to load meeting history from localStorage", e);
+    const token = localStorage.getItem("parotAuthToken");
+    if (token) {
+      setIsAuthenticated(true);
+      setCurrentView("dashboard");
     }
-
+  }, []);
+  useEffect(() => {
     checkBackendHealth();
     const healthInterval = setInterval(checkBackendHealth, 30000);
 
@@ -119,6 +133,28 @@ const App: React.FC = () => {
       cleanup();
     };
   }, []);
+
+  // Separate useEffect for loading meetings
+  useEffect(() => {
+    const loadMeetingsFromDB = async () => {
+      if (!isAuthenticated) return;
+
+      try {
+        setIsLoadingHistory(true);
+        const meetings = await getUserMeetings();
+        setMeetingHistory(meetings);
+      } catch (error) {
+        console.error("Failed to load meetings:", error);
+        setError("Failed to load meeting history");
+      } finally {
+        setIsLoadingHistory(false);
+      }
+    };
+
+    if (isAuthenticated && currentView === "dashboard") {
+      loadMeetingsFromDB();
+    }
+  }, [isAuthenticated, currentView]);
 
   const checkBackendHealth = async () => {
     try {
@@ -186,42 +222,83 @@ const App: React.FC = () => {
     }
   };
 
-  const saveMeetingToHistory = (result: AnalysisResult) => {
-    const newMeeting: AnalysisResultWithMeta = {
-      id: Date.now().toString(),
-      title: `Meeting - ${new Date().toLocaleString()}`,
-      timestamp: new Date().toISOString(),
-      result: result,
-    };
-    setMeetingHistory((prev) => {
-      const updatedHistory = [newMeeting, ...prev];
-      localStorage.setItem("meetingHistory", JSON.stringify(updatedHistory));
-      return updatedHistory;
-    });
-    return newMeeting;
+  const refreshMeetingHistory = async () => {
+    if (!isAuthenticated) return;
+
+    try {
+      const meetings = await getUserMeetings();
+      setMeetingHistory(meetings);
+    } catch (error) {
+      console.error("Failed to refresh meeting history:", error);
+    }
   };
 
-  const deleteFromHistory = (idToDelete: string) => {
-    setMeetingHistory((prev) => {
-      const updatedHistory = prev.filter((item) => item.id !== idToDelete);
-      localStorage.setItem("meetingHistory", JSON.stringify(updatedHistory));
-      return updatedHistory;
-    });
+  const deleteFromHistory = async (idToDelete: string) => {
+    try {
+      await deleteMeeting(idToDelete);
+      // Refresh the list after deletion
+      await refreshMeetingHistory();
+
+      // If the deleted meeting was currently open, close it
+      if (activeAnalysis && idToDelete === currentMeetingId) {
+        handleCloseAnalysis();
+      }
+    } catch (error) {
+      console.error("Failed to delete meeting:", error);
+      setError("Failed to delete meeting");
+    }
   };
 
-  const handleSelectHistory = (analysis: AnalysisResult) => {
-    setActiveAnalysis(analysis);
-    setMeetingState(MeetingState.ANALYSIS_READY);
+  const handleSelectHistory = async (meetingId: string) => {
+    try {
+      setMeetingState(MeetingState.PROCESSING);
+      setError(null);
+      setCurrentMeetingId(meetingId);
+      // Fetch complete meeting data from database
+      const meetingData = await getMeetingById(meetingId);
+
+      // Convert database format to AnalysisResult format
+      const analysis: AnalysisResult = {
+        summary: meetingData.summary?.summary_text || "No summary available",
+        sentiment: {
+          overall:
+            meetingData.sentiment_analysis?.overall_sentiment || "Neutral",
+          highlights: meetingData.sentiment_analysis?.highlights || [],
+        },
+        emotionAnalysis: meetingData.sentiment_analysis?.emotion_analysis || [],
+        actionItems:
+          meetingData.action_items?.map((item: any) => item.description) || [],
+        keyDecisions:
+          meetingData.key_decisions?.map((kd: any) => kd.decision) || [],
+        diarizedTranscript:
+          meetingData.transcripts?.map((t: any) => ({
+            speaker: t.speaker?.speaker_label || "Unknown",
+            text: t.text,
+          })) || [],
+        spectrogramUrl: meetingData.spectrogram_url,
+      };
+
+      setActiveAnalysis(analysis);
+      setMeetingState(MeetingState.ANALYSIS_READY);
+    } catch (error) {
+      console.error("Failed to load meeting:", error);
+      setError("Failed to load meeting details");
+      setMeetingState(MeetingState.ERROR);
+    }
   };
 
   const handleCloseAnalysis = () => {
     setActiveAnalysis(null);
     setActiveAudioFile(null);
+    setCurrentMeetingId(null); // ← ADD THIS LINE
+
     setMeetingState(MeetingState.IDLE);
     setError(null);
   };
 
   const handleLogout = () => {
+    logout();
+    setIsAuthenticated(false);
     setCurrentView("landing");
   };
 
@@ -300,7 +377,8 @@ const App: React.FC = () => {
           };
 
           setActiveAnalysis(finalResult);
-          saveMeetingToHistory(finalResult);
+          // Meeting is already saved to DB by backend - just refresh the list
+          await refreshMeetingHistory();
           setMeetingState(MeetingState.ANALYSIS_READY);
         } catch (err) {
           console.error("Processing error:", err);
@@ -633,39 +711,45 @@ registerProcessor('audio-processor', AudioProcessor);
               // setDeepgramText("");  // ← REMOVE THIS LINE
             }
           } else if (data.type === "large_result") {
-            // Large transcription is complete
             setLargeText(data.text);
             setIsProcessingLarge(false);
             setStats((prev) => ({ ...prev, large: prev.large + 1 }));
 
-            // Clear interim transcripts
             setMediumTranscript("");
             setDeepgramText("");
             cumulativeMediumRef.current = "";
 
-            // NOW process the complete audio for full analysis
+            if (wsRef.current && (wsRef.current as any).__fallbackTimeout) {
+              clearTimeout((wsRef.current as any).__fallbackTimeout);
+            }
+
+            setTimeout(() => {
+              closeWebSocket();
+            }, 500);
+
             if (recordedAudioChunksRef.current.length > 0) {
               try {
                 setMeetingState(MeetingState.PROCESSING);
 
-                // Create blob from recorded chunks
                 const audioBlob = new Blob(recordedAudioChunksRef.current, {
                   type: "audio/wav",
                 });
 
-                // Process through MAIN BACKEND for diarization and Gemini analysis
                 processRealtimeComplete(audioBlob)
-                  .then((analysisResult) => {
-                    // Set the analysis result and show it
+                  .then(async (analysisResult) => {
+                    console.log(
+                      "✅ Analysis complete, navigating to results...",
+                    );
                     setActiveAnalysis(analysisResult);
+                    setActiveAudioFile(audioBlob);
+
+                    // Refresh meeting history from database
+                    await refreshMeetingHistory();
+
+                    // Navigate to dashboard view and show analysis
+                    setCurrentView("dashboard");
                     setMeetingState(MeetingState.ANALYSIS_READY);
-
-                    // Save to history
-                    saveMeetingToHistory(analysisResult);
-
                     setSuccess("Meeting analysis complete!");
-
-                    // Clear recorded chunks
                     recordedAudioChunksRef.current = [];
                   })
                   .catch((err) => {
@@ -675,6 +759,7 @@ registerProcessor('audio-processor', AudioProcessor);
                         ? err.message
                         : "Failed to process meeting analysis",
                     );
+                    setCurrentView("dashboard");
                     setMeetingState(MeetingState.ERROR);
                   });
               } catch (err) {
@@ -696,12 +781,20 @@ registerProcessor('audio-processor', AudioProcessor);
 
       ws.onerror = (error) => {
         console.error("WebSocket error:", error);
-        setRealtimeError("Connection error. Please check backend.");
-        stopListening();
+        if (isListening) {
+          setRealtimeError("Connection error. Please check backend.");
+          stopListening();
+        }
       };
 
-      ws.onclose = () => {
-        console.log("WebSocket closed");
+      ws.onclose = (event) => {
+        console.log("WebSocket closed:", event.code, event.reason);
+
+        // If closed while recording → error
+        if (isListening && !isProcessingLarge) {
+          setRealtimeError("Connection lost during recording.");
+          stopListening();
+        }
       };
     } catch (err) {
       console.error("Error starting recording:", err);
@@ -715,7 +808,13 @@ registerProcessor('audio-processor', AudioProcessor);
     setIsListening(false);
     setIsProcessingLarge(true);
 
-    // Send stop message to backend to trigger large model
+    if (
+      mediaRecorderRef.current &&
+      mediaRecorderRef.current.state !== "inactive"
+    ) {
+      mediaRecorderRef.current.stop();
+    }
+
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       try {
         wsRef.current.send(JSON.stringify({ type: "stop" }));
@@ -724,28 +823,11 @@ registerProcessor('audio-processor', AudioProcessor);
       }
     }
 
-    // Stop MediaRecorder and prepare for analysis
-    if (
-      mediaRecorderRef.current &&
-      mediaRecorderRef.current.state !== "inactive"
-    ) {
-      mediaRecorderRef.current.stop();
-
-      // Wait for large model to finish, then process for analysis
-      setTimeout(async () => {
-        await processRecordedAudio();
-      }, 2000); // Wait 2 seconds for large model to complete
-    }
-
-    // Send stop signal
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "stop" }));
-    }
-
-    // Wait before closing so backend can finish
-    setTimeout(() => {
+    const fallbackTimeout = setTimeout(() => {
       closeWebSocket();
-    }, 3000);
+    }, 20000);
+
+    (wsRef.current as any).__fallbackTimeout = fallbackTimeout;
 
     if (durationIntervalRef.current) {
       clearInterval(durationIntervalRef.current);
@@ -772,59 +854,60 @@ registerProcessor('audio-processor', AudioProcessor);
       streamRef.current = null;
     }
   };
-  const processRecordedAudio = async () => {
-    try {
-      // Use the large text that was already transcribed in real-time
-      const finalTranscript = largeText || mediumTranscript || deepgramText;
+  // const processRecordedAudio = async () => {
+  //   try {
+  //     // Use the large text that was already transcribed in real-time
+  //     const finalTranscript = largeText || mediumTranscript || deepgramText;
 
-      if (!finalTranscript || finalTranscript.trim().length === 0) {
-        setRealtimeError("No transcript available for analysis");
-        setIsProcessingLarge(false);
-        return;
-      }
+  //     if (!finalTranscript || finalTranscript.trim().length === 0) {
+  //       setRealtimeError("No transcript available for analysis");
+  //       setIsProcessingLarge(false);
+  //       return;
+  //     }
 
-      // Show processing state
-      setCurrentView("dashboard");
-      setMeetingState(MeetingState.PROCESSING);
-      setError(null);
+  //     // Show processing state
+  //     setCurrentView("dashboard");
+  //     setMeetingState(MeetingState.PROCESSING);
+  //     setError(null);
 
-      // Analyze the transcript that was already generated
-      const analysisResult = await analyzeTranscript(finalTranscript);
+  //     // Analyze the transcript that was already generated
+  //     const analysisResult = await analyzeTranscript(finalTranscript);
 
-      // Parse diarized transcript
-      const parsedTranscript = parseTranscriptToSegments(
-        analysisResult.diarizedTranscript || finalTranscript || "",
-      );
+  //     // Parse diarized transcript
+  //     const parsedTranscript = parseTranscriptToSegments(
+  //       analysisResult.diarizedTranscript || finalTranscript || "",
+  //     );
 
-      // Create final result
-      const finalResult: AnalysisResult = {
-        summary: analysisResult.summary || "No summary available.",
-        sentiment: analysisResult.sentiment || {
-          overall: "Neutral",
-          highlights: [],
-        },
-        emotionAnalysis: analysisResult.emotionAnalysis || [],
-        actionItems: analysisResult.actionItems || [],
-        keyDecisions: analysisResult.keyDecisions || [],
-        diarizedTranscript: parsedTranscript,
-      };
+  //     // Create final result
+  //     const finalResult: AnalysisResult = {
+  //       summary: analysisResult.summary || "No summary available.",
+  //       sentiment: analysisResult.sentiment || {
+  //         overall: "Neutral",
+  //         highlights: [],
+  //       },
+  //       emotionAnalysis: analysisResult.emotionAnalysis || [],
+  //       actionItems: analysisResult.actionItems || [],
+  //       keyDecisions: analysisResult.keyDecisions || [],
+  //       diarizedTranscript: parsedTranscript,
+  //     };
 
-      // Set active analysis and save to history
-      setActiveAnalysis(finalResult);
-      saveMeetingToHistory(finalResult);
-      setMeetingState(MeetingState.ANALYSIS_READY);
-      setIsProcessingLarge(false);
-    } catch (err) {
-      console.error("Processing error:", err);
-      setError(
-        err instanceof Error
-          ? err.message
-          : "An unexpected error occurred during processing.",
-      );
-      setMeetingState(MeetingState.ERROR);
-      setIsProcessingLarge(false);
-    }
-  };
+  //     // Set active analysis and save to history
+  //     setActiveAnalysis(finalResult);
+  //     // Meeting is already saved to DB by backend - just refresh
+  //     await refreshMeetingHistory();
+  //     setMeetingState(MeetingState.ANALYSIS_READY);
+  //     setIsProcessingLarge(false);
+  //   } catch (err) {
+  //     console.error("Processing error:", err);
+  //     setError(
+  //       err instanceof Error
+  //         ? err.message
+  //         : "An unexpected error occurred during processing.",
+  //     );
+  //     setMeetingState(MeetingState.ERROR);
+  //     setIsProcessingLarge(false);
+  //   }
+  // };
 
   // const processRecordedAudio = async () => {
   //   try {
@@ -1285,26 +1368,43 @@ registerProcessor('audio-processor', AudioProcessor);
                 <HistoryIcon className="w-7 h-7 mr-3" />
                 Meeting History
               </h2>
-              {meetingHistory.length > 0 ? (
+              {isLoadingHistory ? (
+                <div className="flex items-center justify-center py-8">
+                  <LoaderIcon className="w-8 h-8 animate-spin text-cyan-400" />
+                  <span className="ml-3 text-gray-400">
+                    Loading meetings...
+                  </span>
+                </div>
+              ) : meetingHistory.length > 0 ? (
                 <div className="space-y-3 max-h-60 overflow-y-auto pr-2">
-                  {meetingHistory.map((item) => (
+                  {meetingHistory.map((meeting) => (
                     <div
-                      key={item.id}
+                      key={meeting.id}
                       className="flex items-center justify-between bg-gray-800/50 p-3 rounded-lg border border-gray-700 hover:bg-gray-800 transition-colors"
                     >
                       <button
-                        onClick={() => handleSelectHistory(item.result)}
+                        onClick={() => handleSelectHistory(meeting.id)}
                         className="flex-grow text-left"
                       >
-                        <p className="font-semibold text-white">{item.title}</p>
-                        <p className="text-sm text-gray-400">
-                          {new Date(item.timestamp).toLocaleString()}
+                        <p className="font-semibold text-white">
+                          {meeting.title}
                         </p>
+                        <p className="text-sm text-gray-400">
+                          {new Date(meeting.created_at).toLocaleString()}
+                        </p>
+                        {meeting.status && (
+                          <p className="text-xs text-gray-500 mt-1">
+                            Status: {meeting.status}
+                          </p>
+                        )}
                       </button>
                       <button
-                        onClick={() => deleteFromHistory(item.id)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteFromHistory(meeting.id);
+                        }}
                         className="p-2 text-gray-500 hover:text-red-500 hover:bg-gray-700 rounded-full transition-colors"
-                        title="Delete entry"
+                        title="Delete meeting"
                       >
                         <Trash2Icon className="w-5 h-5" />
                       </button>
@@ -1332,7 +1432,7 @@ registerProcessor('audio-processor', AudioProcessor);
   if (currentView === "signup") {
     return (
       <SignupPage
-        onSignupSuccess={() => setCurrentView("dashboard")}
+        onSignupSuccess={() => setCurrentView("login")}
         onNavigateToLogin={() => setCurrentView("login")}
       />
     );
@@ -1341,7 +1441,10 @@ registerProcessor('audio-processor', AudioProcessor);
   if (currentView === "login") {
     return (
       <LoginPage
-        onLoginSuccess={() => setCurrentView("dashboard")}
+        onLoginSuccess={(userData) => {
+          setIsAuthenticated(true);
+          setCurrentView("dashboard");
+        }}
         onNavigateToSignup={() => setCurrentView("signup")}
       />
     );

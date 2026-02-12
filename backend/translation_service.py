@@ -233,12 +233,11 @@ def translate_meeting_content(
                 if isinstance(emotion, dict):
                     translated_emotion = {
                         "emotion": emotion.get("emotion", ""),  # Keep emotion labels
-                        "intensity": emotion.get("intensity", ""),  # Keep intensity
                     }
                     
-                    if "context" in emotion:
-                        translated_emotion["context"] = translate_text(
-                            emotion["context"],
+                    if "reasoning" in emotion:
+                        translated_emotion["reasoning"] = translate_text(
+                            emotion["reasoning"],
                             target_lang,
                             source_lang
                         )

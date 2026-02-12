@@ -55,6 +55,10 @@ export interface ChatMessage {
 export interface AnalysisResultWithMeta {
   id: string;
   title: string;
-  timestamp: string;
-  result: AnalysisResult;
+  created_at: string;
+  user_id: string;
+  audio_file_path?: string;
+  spectrogram_url?: string;
+  duration?: number;
+  status: string;
 }
