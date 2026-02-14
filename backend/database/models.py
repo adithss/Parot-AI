@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Float, ForeignKey, Boolean, JSON, ARRAY
+from sqlalchemy import Column, Integer, String, Text, DateTime, Float, ForeignKey, Boolean, JSON, ARRAY, BigInteger
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database.connection import Base
@@ -17,7 +17,11 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     
     # Relationships
-    meetings = relationship("Meeting", back_populates="user", cascade="all, delete-orphan")
+    hosted_meetings = relationship("Meeting", foreign_keys="Meeting.host_user_id", back_populates="host")
+    meetings = relationship("Meeting", foreign_keys="Meeting.user_id", back_populates="user", cascade="all, delete-orphan")
+    meeting_participants = relationship("MeetingParticipant", back_populates="user", cascade="all, delete-orphan")
+    sent_invitations = relationship("MeetingInvitation", foreign_keys="MeetingInvitation.inviter_user_id", back_populates="inviter")
+    received_invitations = relationship("MeetingInvitation", foreign_keys="MeetingInvitation.invitee_user_id", back_populates="invitee")
     
     def __repr__(self):
         return f"<User(id={self.id}, email={self.email})>"
@@ -28,6 +32,7 @@ class Meeting(Base):
     
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    host_user_id = Column(String, ForeignKey("users.id", ondelete="SET NULL"))
     title = Column(String(255), nullable=False)
     description = Column(Text)
     audio_file_path = Column(String(500))
@@ -36,19 +41,88 @@ class Meeting(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     meeting_date = Column(DateTime(timezone=True))
-    status = Column(String(50), default="completed")  # pending, processing, completed, failed
+    status = Column(String(50), default="completed")  # pending, processing, completed, failed, live
+    
+    # New fields for collaborative meetings
+    is_collaborative = Column(Boolean, default=False)
+    is_live = Column(Boolean, default=False)
+    started_at = Column(DateTime(timezone=True))
+    ended_at = Column(DateTime(timezone=True))
     
     # Relationships
-    user = relationship("User", back_populates="meetings")
+    user = relationship("User", foreign_keys=[user_id], back_populates="meetings")
+    host = relationship("User", foreign_keys=[host_user_id], back_populates="hosted_meetings")
     transcripts = relationship("Transcript", back_populates="meeting", cascade="all, delete-orphan")
     speakers = relationship("Speaker", back_populates="meeting", cascade="all, delete-orphan")
     summary = relationship("Summary", back_populates="meeting", uselist=False, cascade="all, delete-orphan")
     sentiment_analysis = relationship("SentimentAnalysis", back_populates="meeting", uselist=False, cascade="all, delete-orphan")
     action_items = relationship("ActionItem", back_populates="meeting", cascade="all, delete-orphan")
     key_decisions = relationship("KeyDecision", back_populates="meeting", cascade="all, delete-orphan")
+    participants = relationship("MeetingParticipant", back_populates="meeting", cascade="all, delete-orphan")
+    invitations = relationship("MeetingInvitation", back_populates="meeting", cascade="all, delete-orphan")
+    realtime_updates = relationship("RealtimeTranscriptUpdate", back_populates="meeting", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<Meeting(id={self.id}, title={self.title})>"
+
+
+class MeetingParticipant(Base):
+    __tablename__ = "meeting_participants"
+    
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    meeting_id = Column(String, ForeignKey("meetings.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    role = Column(String(50), default="participant")  # host, participant, viewer
+    can_edit = Column(Boolean, default=False)
+    joined_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at = Column(DateTime(timezone=True))
+    is_active = Column(Boolean, default=True)
+    
+    # Relationships
+    meeting = relationship("Meeting", back_populates="participants")
+    user = relationship("User", back_populates="meeting_participants")
+    
+    def __repr__(self):
+        return f"<MeetingParticipant(meeting_id={self.meeting_id}, user_id={self.user_id}, role={self.role})>"
+
+
+class MeetingInvitation(Base):
+    __tablename__ = "meeting_invitations"
+    
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    meeting_id = Column(String, ForeignKey("meetings.id", ondelete="CASCADE"), nullable=False)
+    inviter_user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    invitee_user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    status = Column(String(50), default="pending")  # pending, accepted, declined, cancelled
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    responded_at = Column(DateTime(timezone=True))
+    
+    # Relationships
+    meeting = relationship("Meeting", back_populates="invitations")
+    inviter = relationship("User", foreign_keys=[inviter_user_id], back_populates="sent_invitations")
+    invitee = relationship("User", foreign_keys=[invitee_user_id], back_populates="received_invitations")
+    
+    def __repr__(self):
+        return f"<MeetingInvitation(id={self.id}, status={self.status})>"
+
+
+class RealtimeTranscriptUpdate(Base):
+    __tablename__ = "realtime_transcript_updates"
+    
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    meeting_id = Column(String, ForeignKey("meetings.id", ondelete="CASCADE"), nullable=False)
+    speaker_label = Column(String(100))
+    text = Column(Text, nullable=False)
+    timestamp_ms = Column(BigInteger, nullable=False)  # Milliseconds since meeting start
+    sequence_number = Column(Integer, nullable=False)
+    is_final = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    meeting = relationship("Meeting", back_populates="realtime_updates")
+    
+    def __repr__(self):
+        return f"<RealtimeTranscriptUpdate(meeting_id={self.meeting_id}, seq={self.sequence_number})>"
 
 
 class Transcript(Base):

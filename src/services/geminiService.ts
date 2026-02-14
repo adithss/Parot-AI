@@ -1,6 +1,5 @@
 // API Base URL - update this to match your backend
 export const API_BASE_URL = "http://localhost:8000";
-
 // ============================================================================
 // AUTHENTICATION HELPERS
 // ============================================================================
@@ -606,6 +605,596 @@ export const getCurrentUser = () => {
 };
 
 // ============================================================================
+// COLLABORATIVE MEETING FUNCTIONS
+// ============================================================================
+
+/**
+ * Create a new collaborative meeting
+ */
+export const createCollaborativeMeeting = async (meetingData: {
+  title: string;
+  description?: string;
+}) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/meetings`, {
+      method: "POST",
+      headers: getAuthHeaders(),
+      body: JSON.stringify({
+        ...meetingData,
+        is_collaborative: true,
+        is_live: true,
+      }),
+    });
+
+    if (!response.ok) {
+      await handleApiError(response);
+    }
+
+    return response.json();
+  } catch (error) {
+    console.error("Create collaborative meeting error:", error);
+    throw error;
+  }
+};
+
+/**
+ * Search for users by username or email
+ */
+export const searchUsers = async (query: string, limit: number = 10) => {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/users/search?q=${encodeURIComponent(query)}&limit=${limit}`,
+      {
+        method: "GET",
+        headers: getAuthHeaders(),
+      },
+    );
+
+    if (!response.ok) {
+      await handleApiError(response);
+    }
+
+    return response.json();
+  } catch (error) {
+    console.error("Search users error:", error);
+    throw error;
+  }
+};
+
+/**
+ * Invite a user to a meeting
+ */
+export const inviteUserToMeeting = async (
+  meetingId: string,
+  username: string,
+) => {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/meetings/${meetingId}/invite`,
+      {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          meeting_id: meetingId,
+          invitee_username: username,
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      await handleApiError(response);
+    }
+
+    return response.json();
+  } catch (error) {
+    console.error("Invite user error:", error);
+    throw error;
+  }
+};
+
+/**
+ * Invite multiple users to a meeting
+ */
+export const inviteMultipleUsers = async (
+  meetingId: string,
+  usernames: string[],
+) => {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/meetings/${meetingId}/invite-multiple`,
+      {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          usernames,
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      await handleApiError(response);
+    }
+
+    return response.json();
+  } catch (error) {
+    console.error("Invite multiple users error:", error);
+    throw error;
+  }
+};
+
+/**
+ * Get user's invitations
+ */
+export const getMyInvitations = async (status?: string) => {
+  try {
+    const url = status
+      ? `${API_BASE_URL}/api/invitations?status=${status}`
+      : `${API_BASE_URL}/api/invitations`;
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: getAuthHeaders(),
+    });
+
+    if (!response.ok) {
+      await handleApiError(response);
+    }
+
+    return response.json();
+  } catch (error) {
+    console.error("Get invitations error:", error);
+    throw error;
+  }
+};
+
+/**
+ * Respond to a meeting invitation
+ */
+export const respondToInvitation = async (
+  invitationId: string,
+  status: "accepted" | "declined",
+) => {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/invitations/${invitationId}/respond`,
+      {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ status }),
+      },
+    );
+
+    if (!response.ok) {
+      await handleApiError(response);
+    }
+
+    return response.json();
+  } catch (error) {
+    console.error("Respond to invitation error:", error);
+    throw error;
+  }
+};
+
+/**
+ * Get meeting participants
+ */
+export const getMeetingParticipants = async (meetingId: string) => {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/meetings/${meetingId}/participants`,
+      {
+        method: "GET",
+        headers: getAuthHeaders(),
+      },
+    );
+
+    if (!response.ok) {
+      await handleApiError(response);
+    }
+
+    return response.json();
+  } catch (error) {
+    console.error("Get participants error:", error);
+    throw error;
+  }
+};
+
+/**
+ * Remove a participant from a meeting
+ */
+export const removeParticipant = async (meetingId: string, userId: string) => {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/meetings/${meetingId}/participants/${userId}`,
+      {
+        method: "DELETE",
+        headers: getAuthHeaders(),
+      },
+    );
+
+    if (!response.ok) {
+      await handleApiError(response);
+    }
+
+    return response.json();
+  } catch (error) {
+    console.error("Remove participant error:", error);
+    throw error;
+  }
+};
+
+/**
+ * Start a collaborative meeting (mark as live)
+ */
+export const startMeeting = async (meetingId: string) => {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/meetings/${meetingId}/start`,
+      {
+        method: "POST",
+        headers: getAuthHeaders(),
+      },
+    );
+
+    if (!response.ok) {
+      await handleApiError(response);
+    }
+
+    return response.json();
+  } catch (error) {
+    console.error("Start meeting error:", error);
+    throw error;
+  }
+};
+
+/**
+ * End a collaborative meeting
+ */
+export const endMeeting = async (meetingId: string) => {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/meetings/${meetingId}/end`,
+      {
+        method: "POST",
+        headers: getAuthHeaders(),
+      },
+    );
+
+    if (!response.ok) {
+      await handleApiError(response);
+    }
+
+    return response.json();
+  } catch (error) {
+    console.error("End meeting error:", error);
+    throw error;
+  }
+};
+
+/**
+ * Get live meetings
+ */
+export const getLiveMeetings = async () => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/meetings/live`, {
+      method: "GET",
+      headers: getAuthHeaders(),
+    });
+
+    if (!response.ok) {
+      await handleApiError(response);
+    }
+
+    return response.json();
+  } catch (error) {
+    console.error("Get live meetings error:", error);
+    throw error;
+  }
+};
+
+/**
+ * Get collaborative meetings
+ */
+export const getCollaborativeMeetings = async (
+  skip: number = 0,
+  limit: number = 100,
+) => {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/meetings/collaborative?skip=${skip}&limit=${limit}`,
+      {
+        method: "GET",
+        headers: getAuthHeaders(),
+      },
+    );
+
+    if (!response.ok) {
+      await handleApiError(response);
+    }
+
+    return response.json();
+  } catch (error) {
+    console.error("Get collaborative meetings error:", error);
+    throw error;
+  }
+};
+
+/**
+ * Add a real-time transcript update
+ */
+export const addRealtimeUpdate = async (
+  meetingId: string,
+  update: {
+    speaker_label?: string;
+    text: string;
+    timestamp_ms: number;
+    sequence_number: number;
+    is_final: boolean;
+  },
+) => {
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/meetings/${meetingId}/realtime-updates`,
+      {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          meeting_id: meetingId,
+          ...update,
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      await handleApiError(response);
+    }
+
+    return response.json();
+  } catch (error) {
+    console.error("Add realtime update error:", error);
+    throw error;
+  }
+};
+
+/**
+ * Get real-time transcript updates
+ */
+export const getRealtimeUpdates = async (
+  meetingId: string,
+  afterSequence?: number,
+  limit: number = 100,
+) => {
+  try {
+    let url = `${API_BASE_URL}/api/meetings/${meetingId}/realtime-updates?limit=${limit}`;
+    if (afterSequence !== undefined) {
+      url += `&after_sequence=${afterSequence}`;
+    }
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: getAuthHeaders(),
+    });
+
+    if (!response.ok) {
+      await handleApiError(response);
+    }
+
+    return response.json();
+  } catch (error) {
+    console.error("Get realtime updates error:", error);
+    throw error;
+  }
+};
+
+/**
+ * Process real-time audio with collaboration support
+ */
+export const processRealtimeCompleteWithCollaboration = async (
+  audioBlob: Blob,
+  isCollaborative: boolean = false,
+  meetingId?: string,
+): Promise<any> => {
+  try {
+    // Convert blob to base64
+    const base64Audio = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const base64String = (reader.result as string).split(",")[1];
+        resolve(base64String);
+      };
+      reader.onerror = () => {
+        reject(new Error("Failed to convert audio to base64"));
+      };
+      reader.readAsDataURL(audioBlob);
+    });
+
+    let url = `${API_BASE_URL}/api/process-realtime-complete?is_collaborative=${isCollaborative}`;
+    if (meetingId) {
+      url += `&meeting_id=${meetingId}`;
+    }
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: getAuthHeaders(),
+      body: JSON.stringify({
+        audio_base64: base64Audio,
+        mime_type: audioBlob.type,
+      }),
+    });
+
+    if (!response.ok) {
+      await handleApiError(response);
+    }
+
+    const data = await response.json();
+
+    if (!data.success || !data.analysis) {
+      throw new Error("Invalid response from processing service");
+    }
+
+    return {
+      ...data.analysis,
+      spectrogramUrl: data.spectrogramUrl,
+      meetingId: data.meetingId,
+    };
+  } catch (error) {
+    console.error("Real-time complete processing error:", error);
+    if (error instanceof Error) {
+      throw error;
+    }
+    throw new Error("Failed to process real-time audio. Please try again.");
+  }
+};
+
+// ============================================================================
+// POLLING UTILITY FOR REAL-TIME UPDATES
+// ============================================================================
+
+/**
+ * Poll for new real-time updates
+ * Returns a cleanup function to stop polling
+ */
+export const pollRealtimeUpdates = (
+  meetingId: string,
+  onUpdate: (updates: any[]) => void,
+  intervalMs: number = 2000,
+): (() => void) => {
+  let lastSequence = -1;
+  let isPolling = true;
+
+  const poll = async () => {
+    if (!isPolling) return;
+
+    try {
+      const updates = await getRealtimeUpdates(meetingId, lastSequence);
+
+      if (updates && updates.length > 0) {
+        onUpdate(updates);
+        lastSequence = Math.max(...updates.map((u: any) => u.sequence_number));
+      }
+    } catch (error) {
+      console.error("Polling error:", error);
+    }
+
+    if (isPolling) {
+      setTimeout(poll, intervalMs);
+    }
+  };
+
+  // Start polling
+  poll();
+
+  // Return cleanup function
+  return () => {
+    isPolling = false;
+  };
+};
+// ============================================================================
+// REAL-TIME STREAMING TRANSCRIPTION (NEW)
+// ============================================================================
+
+/**
+ * Connect to streaming transcription endpoint (for HOST)
+ * This establishes a WebSocket connection to stream audio and receive live transcriptions
+ *
+ * @param meetingId - The collaborative meeting ID
+ * @param onTranscription - Callback when transcription is received
+ * @returns WebSocket instance
+ */
+export const connectStreamingTranscription = (
+  meetingId: string,
+  onTranscription: (text: string, isFinal: boolean, source?: string) => void,
+): WebSocket => {
+  const wsUrl = `ws://localhost:8000/ws/meetings/${meetingId}/stream`;
+  const ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
+    console.log("✅ Connected to streaming transcription endpoint");
+  };
+
+  ws.onmessage = (event) => {
+    try {
+      const message = JSON.parse(event.data);
+
+      if (message.type === "stream_ready") {
+        console.log("🎙️ Stream ready - you can start speaking");
+      } else if (message.type === "transcription_echo") {
+        // Host receives their own transcription
+        const { text, is_final, source } = message.data;
+        if (text && text.trim()) {
+          onTranscription(text, is_final, source);
+        }
+      } else if (message.type === "stream_stopped") {
+        console.log("🛑 Stream stopped successfully");
+      } else if (message.type === "error") {
+        console.error("❌ Stream error:", message.message);
+      }
+    } catch (error) {
+      console.error("Error parsing streaming message:", error);
+    }
+  };
+
+  ws.onerror = (error) => {
+    console.error("❌ Streaming WebSocket error:", error);
+  };
+
+  ws.onclose = () => {
+    console.log("🔌 Streaming WebSocket closed");
+  };
+
+  return ws;
+};
+
+/**
+ * Send audio chunk through streaming WebSocket
+ * @param ws - The WebSocket connection
+ * @param audioChunk - PCM16 audio data (ArrayBuffer or Int16Array)
+ */
+export const sendAudioChunk = (
+  ws: WebSocket,
+  audioChunk: ArrayBuffer | Int16Array,
+): void => {
+  if (ws.readyState === WebSocket.OPEN) {
+    // Convert to ArrayBuffer if it's Int16Array
+    const buffer =
+      audioChunk instanceof Int16Array ? audioChunk.buffer : audioChunk;
+
+    ws.send(buffer);
+  } else {
+    console.warn("WebSocket not open, cannot send audio chunk");
+  }
+};
+
+/**
+ * Send control message through streaming WebSocket
+ * @param ws - The WebSocket connection
+ * @param message - Control message object
+ */
+export const sendStreamingMessage = (ws: WebSocket, message: any): void => {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(message));
+  }
+};
+
+/**
+ * Stop streaming session
+ * @param ws - The WebSocket connection to close
+ */
+export const stopStreaming = (ws: WebSocket): void => {
+  if (ws.readyState === WebSocket.OPEN) {
+    // Send stop signal
+    ws.send(JSON.stringify({ type: "stop" }));
+
+    // Wait a bit for graceful close, then force close
+    setTimeout(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+    }, 500);
+  }
+};
+
+// ============================================================================
 // DEFAULT EXPORT
 // ============================================================================
 
@@ -637,4 +1226,28 @@ export default {
 
   // Health
   checkBackendHealth,
+
+  // Collaboration
+  createCollaborativeMeeting,
+  searchUsers,
+  inviteUserToMeeting,
+  inviteMultipleUsers,
+  getMyInvitations,
+  respondToInvitation,
+  getMeetingParticipants,
+  removeParticipant,
+  startMeeting,
+  endMeeting,
+  getLiveMeetings,
+  getCollaborativeMeetings,
+  addRealtimeUpdate,
+  getRealtimeUpdates,
+  processRealtimeCompleteWithCollaboration,
+  pollRealtimeUpdates,
+
+  // Streaming Transcription (NEW)
+  connectStreamingTranscription,
+  sendAudioChunk,
+  sendStreamingMessage,
+  stopStreaming,
 };

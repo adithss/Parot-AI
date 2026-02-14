@@ -1,19 +1,19 @@
 import React, { useState, useEffect, useRef } from "react";
-import {
-  MeetingState,
-  AnalysisResult,
-  AnalysisResultWithMeta,
-  SpeakerSegment,
-} from "./types";
+import { MeetingState, AnalysisResult, SpeakerSegment } from "./types";
 import {
   analyzeTranscript,
   transcribeAudio,
-  processRealtimeComplete,
+  processRealtimeCompleteWithCollaboration,
   logout,
-  isAuthenticated,
   getUserMeetings,
-  getMeetingById, // ← NEW
+  getMeetingById,
   deleteMeeting,
+  createCollaborativeMeeting,
+  addRealtimeUpdate,
+  getRealtimeUpdates,
+  connectStreamingTranscription, // NEW
+  sendAudioChunk, // NEW
+  stopStreaming, // NEW
 } from "./services/geminiService";
 import {
   MicIcon,
@@ -35,14 +35,16 @@ import {
   AlertCircle,
   CheckCircle2,
   ArrowLeft,
-  MicOff,
+  Users,
 } from "lucide-react";
-// import apiService from "./services/apiService";
 import MeetingAnalysis from "./components/MeetingAnalysis";
 import LandingPage from "./components/LandingPage";
 import SignupPage from "./components/SignupPage";
 import LoginPage from "./components/LoginPage";
 import Spectrogram from "./components/Spectrogram";
+import ParticipantsPanel, {
+  InvitationsList,
+} from "./components/ParticipantsPanel";
 
 type AppView = "landing" | "signup" | "login" | "dashboard" | "realtime";
 
@@ -50,15 +52,6 @@ const COLAB_URL = "https://unnarrowly-unrevered-griffin.ngrok-free.dev";
 
 // Constants for real-time recording
 const SAMPLE_RATE = 16000;
-const FRAME_DURATION_MS = 100;
-const FRAME_SIZE = Math.floor((SAMPLE_RATE * FRAME_DURATION_MS) / 1000);
-
-interface TranscriptSegment {
-  text: string;
-  timestamp: number;
-  type: "tiny" | "medium" | "large";
-  id: string;
-}
 
 interface MeetingFromDB {
   id: string;
@@ -69,7 +62,11 @@ interface MeetingFromDB {
   spectrogram_url?: string;
   duration?: number;
   status: string;
+  is_collaborative?: boolean;
+  is_live?: boolean;
+  host_user_id?: string;
 }
+
 const App: React.FC = () => {
   const [currentView, setCurrentView] = useState<AppView>("landing");
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
@@ -87,11 +84,9 @@ const App: React.FC = () => {
   const [meetingHistory, setMeetingHistory] = useState<MeetingFromDB[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [currentMeetingId, setCurrentMeetingId] = useState<string | null>(null);
-
+  const wsConnectionRef = useRef<WebSocket | null>(null);
   // Real-time recording states
-  const [deepgramText, setDeepgramText] = useState("");
-  const [mediumTranscript, setMediumTranscript] = useState("");
-  const [largeText, setLargeText] = useState("");
+  const [realtimeText, setRealtimeText] = useState(""); // Single unified transcript
   const [isListening, setIsListening] = useState(false);
   const [isProcessingLarge, setIsProcessingLarge] = useState(false);
   const [realtimeError, setRealtimeError] = useState("");
@@ -107,6 +102,15 @@ const App: React.FC = () => {
     large: 0,
   });
 
+  // Collaboration states
+  const [isCollaborative, setIsCollaborative] = useState(false);
+  const [isHost, setIsHost] = useState(false);
+  const [showParticipantsPanel, setShowParticipantsPanel] = useState(false);
+  const [sequenceNumber, setSequenceNumber] = useState(0);
+  // NEW: Streaming transcription states
+  const [liveTranscript, setLiveTranscript] = useState("");
+  const [interimText, setInterimText] = useState("");
+
   // Refs for real-time recording
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -114,9 +118,11 @@ const App: React.FC = () => {
   const streamRef = useRef<MediaStream | null>(null);
   const durationIntervalRef = useRef<number | null>(null);
   const sessionStartTimeRef = useRef<number>(0);
-  const cumulativeMediumRef = useRef<string>("");
   const recordedAudioChunksRef = useRef<Blob[]>([]);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const pollingIntervalRef = useRef<number | null>(null);
+  const lastPolledSequenceRef = useRef<number>(0);
+  const streamingWsRef = useRef<WebSocket | null>(null); // NEW: For streaming audio to backend
   useEffect(() => {
     const token = localStorage.getItem("parotAuthToken");
     if (token) {
@@ -124,6 +130,7 @@ const App: React.FC = () => {
       setCurrentView("dashboard");
     }
   }, []);
+
   useEffect(() => {
     checkBackendHealth();
     const healthInterval = setInterval(checkBackendHealth, 30000);
@@ -134,7 +141,6 @@ const App: React.FC = () => {
     };
   }, []);
 
-  // Separate useEffect for loading meetings
   useEffect(() => {
     const loadMeetingsFromDB = async () => {
       if (!isAuthenticated) return;
@@ -155,6 +161,133 @@ const App: React.FC = () => {
       loadMeetingsFromDB();
     }
   }, [isAuthenticated, currentView]);
+
+  // Poll for real-time updates when in collaborative mode
+  // WebSocket for real-time updates when in collaborative mode
+  useEffect(() => {
+    if (
+      isCollaborative &&
+      currentMeetingId &&
+      !isHost &&
+      currentView === "realtime"
+    ) {
+      // Connect to WebSocket
+      const wsUrl = `ws://localhost:8000/ws/meetings/${currentMeetingId}`;
+      const ws = new WebSocket(wsUrl);
+      wsConnectionRef.current = ws;
+
+      ws.onopen = () => {
+        console.log("✅ WebSocket connected to meeting", currentMeetingId);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+
+          // NEW: Handle live transcription broadcasts
+          if (
+            message.type === "live_transcription" ||
+            message.type === "host_transcription"
+          ) {
+            const { text, is_final, source } = message.data;
+
+            console.log(
+              `📝 [${source}] Received: "${text.substring(0, 50)}..." (final: ${is_final})`,
+            );
+
+            if (source === "deepgram") {
+              if (!is_final) {
+                // Interim Deepgram results (gray/italic)
+                setInterimText(text);
+              } else {
+                // Final Deepgram result - add to transcript
+                setRealtimeText((prev) => (prev ? `${prev} ${text}` : text));
+                setInterimText("");
+              }
+            } else if (source === "medium") {
+              // Medium refinement - add to transcript
+              setRealtimeText((prev) => (prev ? `${prev} ${text}` : text));
+              setInterimText("");
+            } else if (source === "large") {
+              // Large final refinement - this is the polished version
+              setRealtimeText(text);
+              setInterimText("");
+            }
+          }
+          // NEW: Handle analysis completion broadcast
+          else if (message.type === "analysis_complete") {
+            console.log("📊 PARTICIPANT: Received complete analysis");
+            const analysisData = message.data.analysis;
+
+            // Parse the diarized transcript properly
+            const parsedTranscript = parseTranscriptToSegments(
+              analysisData.diarizedTranscript || [],
+            );
+
+            // Set the analysis to show the results
+            setActiveAnalysis({
+              summary: analysisData.summary || "No summary available",
+              sentiment: analysisData.sentiment || {
+                overall: "Neutral",
+                highlights: [],
+              },
+              emotionAnalysis: analysisData.emotionAnalysis || [],
+              actionItems: analysisData.actionItems || [],
+              keyDecisions: analysisData.keyDecisions || [],
+              diarizedTranscript: parsedTranscript,
+              spectrogramUrl: message.data.spectrogramUrl,
+              meetingId: message.data.meetingId,
+              isCollaborative: true,
+            });
+
+            // Switch to analysis view
+            setMeetingState(MeetingState.ANALYSIS_READY);
+            setIsProcessingLarge(false);
+            setSuccess("Analysis complete!");
+            setCurrentView("dashboard");
+          }
+          // OLD: Keep for backward compatibility
+          else if (message.type === "transcript_update") {
+            const update = message.data;
+            console.log("📨 Received update:", update);
+
+            if (update.is_final) {
+              setRealtimeText((prev) =>
+                prev ? `${prev} ${update.text}` : update.text,
+              );
+              lastPolledSequenceRef.current = update.sequence_number;
+            }
+          }
+        } catch (error) {
+          console.error("Error parsing WebSocket message:", error);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error("❌ WebSocket error:", error);
+      };
+
+      ws.onclose = () => {
+        console.log("🔌 WebSocket disconnected");
+      };
+
+      // Send periodic ping to keep connection alive
+      const pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "ping" }));
+        }
+      }, 30000); // Every 30 seconds
+
+      // Cleanup on unmount
+      return () => {
+        clearInterval(pingInterval);
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.close();
+        }
+        wsConnectionRef.current = null;
+      };
+    }
+  }, [isCollaborative, currentMeetingId, isHost, currentView]);
 
   const checkBackendHealth = async () => {
     try {
@@ -236,10 +369,8 @@ const App: React.FC = () => {
   const deleteFromHistory = async (idToDelete: string) => {
     try {
       await deleteMeeting(idToDelete);
-      // Refresh the list after deletion
       await refreshMeetingHistory();
 
-      // If the deleted meeting was currently open, close it
       if (activeAnalysis && idToDelete === currentMeetingId) {
         handleCloseAnalysis();
       }
@@ -254,10 +385,9 @@ const App: React.FC = () => {
       setMeetingState(MeetingState.PROCESSING);
       setError(null);
       setCurrentMeetingId(meetingId);
-      // Fetch complete meeting data from database
+
       const meetingData = await getMeetingById(meetingId);
 
-      // Convert database format to AnalysisResult format
       const analysis: AnalysisResult = {
         summary: meetingData.summary?.summary_text || "No summary available",
         sentiment: {
@@ -290,8 +420,7 @@ const App: React.FC = () => {
   const handleCloseAnalysis = () => {
     setActiveAnalysis(null);
     setActiveAudioFile(null);
-    setCurrentMeetingId(null); // ← ADD THIS LINE
-
+    setCurrentMeetingId(null);
     setMeetingState(MeetingState.IDLE);
     setError(null);
   };
@@ -302,16 +431,13 @@ const App: React.FC = () => {
     setCurrentView("landing");
   };
 
-  // Helper function to parse transcript into segments
   const parseTranscriptToSegments = (
     transcript: string | SpeakerSegment[],
   ): SpeakerSegment[] => {
-    // ✅ If backend already sent diarized array
     if (Array.isArray(transcript)) {
       return transcript;
     }
 
-    // ✅ If transcript is string → parse speakers
     const segments: SpeakerSegment[] = [];
     const lines = transcript.split("\n\n");
 
@@ -325,7 +451,6 @@ const App: React.FC = () => {
       }
     });
 
-    // ✅ Fallback if no speakers found
     return segments.length > 0
       ? segments
       : [{ speaker: "Unknown", text: transcript }];
@@ -337,9 +462,7 @@ const App: React.FC = () => {
     if (!event.target.files || event.target.files.length === 0) return;
     const file = event.target.files[0];
 
-    // Store file so MeetingAnalysis can show spectrogram
     setActiveAudioFile(file);
-
     setMeetingState(MeetingState.PROCESSING);
     setError(null);
 
@@ -377,7 +500,6 @@ const App: React.FC = () => {
           };
 
           setActiveAnalysis(finalResult);
-          // Meeting is already saved to DB by backend - just refresh the list
           await refreshMeetingHistory();
           setMeetingState(MeetingState.ANALYSIS_READY);
         } catch (err) {
@@ -404,156 +526,125 @@ const App: React.FC = () => {
     }
   };
 
-  const handleStartRealtimeMeeting = () => {
-    setCurrentView("realtime");
-    setDeepgramText("");
-    setMediumTranscript("");
-    setLargeText("");
-    setRealtimeError("");
-    setSuccess("");
-    setRecordingDuration(0);
-    setStats({ tiny: 0, medium: 0, large: 0 });
-    cumulativeMediumRef.current = "";
-    recordedAudioChunksRef.current = [];
-  };
+  const handleStartRealtimeMeeting = async (collaborative: boolean = false) => {
+    try {
+      setIsCollaborative(collaborative);
+      setIsHost(collaborative); // Host is the one starting the meeting
 
+      // If collaborative, create meeting in database first
+      if (collaborative) {
+        const meeting = await createCollaborativeMeeting({
+          title: `Live Meeting - ${new Date().toLocaleString()}`,
+          description: "Real-time collaborative meeting",
+        });
+        setCurrentMeetingId(meeting.id);
+        // Connect to participant broadcast WebSocket (for sending transcriptions to participants)
+        try {
+          const participantWsUrl = `ws://localhost:8000/ws/meetings/${meeting.id}`;
+          const participantWs = new WebSocket(participantWsUrl);
+          wsConnectionRef.current = participantWs;
+
+          participantWs.onopen = () => {
+            console.log(
+              "✅ HOST: Connected to participant broadcast WebSocket",
+            );
+          };
+
+          participantWs.onmessage = (event) => {
+            // Host doesn't need to receive messages from this WebSocket
+            // It's only for broadcasting TO participants
+            console.log("HOST received broadcast message:", event.data);
+          };
+
+          participantWs.onerror = (error) => {
+            console.error(
+              "❌ HOST: Participant broadcast WebSocket error:",
+              error,
+            );
+          };
+
+          participantWs.onclose = () => {
+            console.log("🔌 HOST: Participant broadcast WebSocket closed");
+          };
+        } catch (broadcastErr) {
+          console.error(
+            "Failed to connect to participant broadcast WebSocket:",
+            broadcastErr,
+          );
+        }
+      }
+
+      setCurrentView("realtime");
+      setRealtimeText("");
+      setLiveTranscript(""); // NEW
+      setInterimText(""); // NEW
+      setRealtimeError("");
+      setSuccess("");
+      setRecordingDuration(0);
+      setStats({ tiny: 0, medium: 0, large: 0 });
+      setSequenceNumber(0);
+      lastPolledSequenceRef.current = 0;
+      recordedAudioChunksRef.current = [];
+    } catch (err) {
+      console.error("Error starting meeting:", err);
+      setError("Failed to start collaborative meeting");
+    }
+  };
   const handleBackFromRealtime = () => {
     if (isListening) {
       stopListening();
     }
+
+    // Close participant WebSocket connection
+    if (wsConnectionRef.current) {
+      if (wsConnectionRef.current.readyState === WebSocket.OPEN) {
+        wsConnectionRef.current.close();
+      }
+      wsConnectionRef.current = null;
+    }
+
+    // NEW: Close streaming WebSocket connection
+    if (streamingWsRef.current) {
+      if (streamingWsRef.current.readyState === WebSocket.OPEN) {
+        stopStreaming(streamingWsRef.current);
+      }
+      streamingWsRef.current = null;
+    }
+
+    setIsListening(false);
     setCurrentView("dashboard");
+    setIsCollaborative(false);
+    setIsHost(false);
+    setCurrentMeetingId(null);
+    setShowParticipantsPanel(false);
+    setLiveTranscript(""); // NEW
+    setInterimText(""); // NEW
   };
 
-  // const startListening = async () => {
-  //   try {
-  //     setRealtimeError("");
-  //     setSuccess("");
+  const sendRealtimeUpdate = async (text: string, isFinal: boolean) => {
+    if (!isCollaborative || !currentMeetingId || !isHost) return;
 
-  //     // Initialize MediaRecorder for saving audio
-  //     const stream = await navigator.mediaDevices.getUserMedia({
-  //       audio: {
-  //         channelCount: 1,
-  //         sampleRate: 16000,
-  //         echoCancellation: true,
-  //         noiseSuppression: true,
-  //         autoGainControl: true,
-  //       },
-  //     });
-  //     streamRef.current = stream;
+    try {
+      const currentSeq = sequenceNumber;
+      setSequenceNumber((prev) => prev + 1);
 
-  //     // recordedAudioChunksRef.current = [];
-  //     // const mediaRecorder = new MediaRecorder(stream);
-  //     // mediaRecorderRef.current = mediaRecorder;
-
-  //     // mediaRecorder.ondataavailable = (event) => {
-  //     //   if (event.data.size > 0) {
-  //     //     recordedAudioChunksRef.current.push(event.data);
-  //     //   }
-  //     // };
-
-  //     // mediaRecorder.start(100); // Collect data every 100ms
-
-  //     // Initialize WebSocket for real-time transcription
-  //     const ws = new WebSocket(
-  //       `${COLAB_URL.replace("https://", "wss://").replace("http://", "ws://")}/api/stream`,
-  //     );
-  //     wsRef.current = ws;
-
-  //     ws.onopen = async () => {
-  //       console.log("WebSocket connected");
-  //       setIsListening(true);
-  //       sessionStartTimeRef.current = Date.now();
-
-  //       durationIntervalRef.current = window.setInterval(() => {
-  //         setRecordingDuration(
-  //           Math.floor((Date.now() - sessionStartTimeRef.current) / 1000),
-  //         );
-  //       }, 1000);
-
-  //       const audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
-  //       audioContextRef.current = audioContext;
-
-  //       await audioContext.audioWorklet.addModule("/audio-processor.js");
-
-  //       const source = audioContext.createMediaStreamSource(stream);
-  //       const workletNode = new AudioWorkletNode(
-  //         audioContext,
-  //         "audio-processor",
-  //       );
-  //       workletNodeRef.current = workletNode;
-
-  //       workletNode.port.onmessage = (event) => {
-  //         const { audioData, isSpeaking: speaking } = event.data;
-  //         setIsSpeaking(speaking);
-
-  //         if (
-  //           audioData &&
-  //           ws.readyState === WebSocket.OPEN &&
-  //           audioData.byteLength > 0
-  //         ) {
-  //           console.log("Audio frame size:", audioData.byteLength); // debug
-
-  //           const int16Array = new Int16Array(audioData);
-  //           ws.send(int16Array.buffer);
-  //         }
-  //       };
-
-  //       source.connect(workletNode);
-  //       workletNode.connect(audioContext.destination);
-  //     };
-
-  //     ws.onmessage = (event) => {
-  //       try {
-  //         const data = JSON.parse(event.data);
-
-  //         if (data.type === "deepgram_transcript") {
-  //           setDeepgramText(data.text);
-  //           setStats((prev) => ({ ...prev, tiny: prev.tiny + 1 }));
-  //         } else if (data.type === "medium_delta") {
-  //           const newCumulative = data.text;
-  //           cumulativeMediumRef.current = newCumulative;
-  //           setMediumTranscript(newCumulative);
-  //           setStats((prev) => ({ ...prev, medium: prev.medium + 1 }));
-  //         } else if (data.type === "large_result") {
-  //           setLargeText(data.text);
-  //           setIsProcessingLarge(false);
-  //           setStats((prev) => ({ ...prev, large: prev.large + 1 }));
-
-  //           // Process for analysis when large model finishes
-  //         } else if (data.type === "error") {
-  //           setRealtimeError(data.message || "Transcription error");
-  //         }
-  //       } catch (e) {
-  //         console.error("Error parsing WebSocket message:", e);
-  //       }
-  //     };
-
-  //     ws.onerror = (error) => {
-  //       console.error("WebSocket error:", error);
-  //       setRealtimeError("Connection error. Please check backend.");
-  //       stopListening();
-  //     };
-
-  //     ws.onclose = () => {
-  //       console.log("WebSocket closed");
-  //     };
-  //   } catch (err) {
-  //     console.error("Error starting recording:", err);
-  //     setRealtimeError(
-  //       "Failed to access microphone. Please check permissions.",
-  //     );
-  //     setIsListening(false);
-  //   }
-  // };
-  // COMPLETE FIX FOR YOUR INTEGRATED APP.TSX
-  // Replace your entire startListening() function with this one
+      await addRealtimeUpdate(currentMeetingId, {
+        speaker_label: "Host", // You can enhance this with actual speaker detection
+        text: text,
+        timestamp_ms: Date.now() - sessionStartTimeRef.current,
+        sequence_number: currentSeq,
+        is_final: isFinal,
+      });
+    } catch (err) {
+      console.error("Error sending real-time update:", err);
+    }
+  };
 
   const startListening = async () => {
     try {
       setRealtimeError("");
       setSuccess("");
 
-      // Initialize MediaRecorder for saving audio
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
@@ -564,7 +655,7 @@ const App: React.FC = () => {
         },
       });
       streamRef.current = stream;
-      // Initialize MediaRecorder to save audio for later processing
+
       recordedAudioChunksRef.current = [];
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
@@ -572,11 +663,44 @@ const App: React.FC = () => {
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           recordedAudioChunksRef.current.push(event.data);
+          mediaRecorder.ondataavailable = (event) => {
+            if (event.data && event.data.size > 0) {
+              recordedAudioChunksRef.current.push(event.data);
+
+              // NEW: If streaming is active, send audio chunk to backend
+              if (
+                streamingWsRef.current &&
+                streamingWsRef.current.readyState === WebSocket.OPEN
+              ) {
+                // Convert Blob to ArrayBuffer and send
+                event.data.arrayBuffer().then((arrayBuffer) => {
+                  // Convert to Int16 PCM (required format)
+                  const audioContext = new AudioContext({ sampleRate: 16000 });
+                  audioContext
+                    .decodeAudioData(arrayBuffer.slice(0))
+                    .then((audioBuffer) => {
+                      const channelData = audioBuffer.getChannelData(0);
+                      const pcm16 = new Int16Array(channelData.length);
+
+                      for (let i = 0; i < channelData.length; i++) {
+                        const s = Math.max(-1, Math.min(1, channelData[i]));
+                        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+                      }
+
+                      sendAudioChunk(streamingWsRef.current!, pcm16.buffer);
+                    })
+                    .catch((err) => {
+                      console.error("Error decoding audio for streaming:", err);
+                    });
+                });
+              }
+            }
+          };
         }
       };
 
-      mediaRecorder.start(100); // Collect data every 100ms
-      // Initialize WebSocket for real-time transcription
+      mediaRecorder.start(100);
+
       const ws = new WebSocket(
         `${COLAB_URL.replace("https://", "wss://").replace("http://", "ws://")}/api/stream`,
       );
@@ -596,12 +720,11 @@ const App: React.FC = () => {
         const audioContext = new AudioContext({ sampleRate: 16000 });
         audioContextRef.current = audioContext;
 
-        // ============ FIX: Create AudioWorklet code inline ============
         const workletCode = `
 class AudioProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.bufferSize = 1600; // 100ms at 16kHz
+    this.bufferSize = 1600;
     this.buffer = new Float32Array(this.bufferSize);
     this.bufferIndex = 0;
     this.silenceThreshold = 0.01;
@@ -626,7 +749,6 @@ class AudioProcessor extends AudioWorkletProcessor {
       maxAmplitude = Math.max(maxAmplitude, Math.abs(inputData[i]));
 
       if (this.bufferIndex >= this.bufferSize) {
-        // Convert to PCM16
         const pcm16 = new Int16Array(this.bufferSize);
         for (let j = 0; j < this.bufferSize; j++) {
           const s = Math.max(-1, Math.min(1, this.buffer[j]));
@@ -660,7 +782,6 @@ registerProcessor('audio-processor', AudioProcessor);
 
         await audioContext.audioWorklet.addModule(workletUrl);
         URL.revokeObjectURL(workletUrl);
-        // ============ END FIX ============
 
         const source = audioContext.createMediaStreamSource(stream);
         const workletNode = new AudioWorkletNode(
@@ -673,13 +794,15 @@ registerProcessor('audio-processor', AudioProcessor);
           const { audioData, isSpeaking: speaking } = event.data;
           setIsSpeaking(speaking);
 
-          if (
-            audioData &&
-            ws.readyState === WebSocket.OPEN &&
-            audioData.byteLength > 0
-          ) {
-            // Send as ArrayBuffer (PCM16 format)
-            ws.send(audioData);
+          if (audioData && audioData.byteLength > 0) {
+            // ALWAYS send audio to Colab WebSocket for transcription
+            // (Works for both solo and collaborative modes)
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(audioData);
+            }
+
+            // NOTE: We do NOT send raw audio to streamingWsRef
+            // That WebSocket is only for control messages and broadcasting transcriptions
           }
         };
 
@@ -687,42 +810,126 @@ registerProcessor('audio-processor', AudioProcessor);
         workletNode.connect(audioContext.destination);
       };
 
-      // ============ FIX: Change "tiny_result" to "deepgram_transcript" ============
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
 
           if (data.type === "deepgram_transcript") {
-            // ALWAYS update Deepgram text (don't let Medium block it)
-            setDeepgramText(data.text);
-            setStats((prev) => ({ ...prev, tiny: prev.tiny + 1 }));
-          } else if (data.type === "medium_delta") {
-            const newDelta = data.text.trim();
-            if (newDelta) {
-              const newCumulative = cumulativeMediumRef.current
-                ? `${cumulativeMediumRef.current} ${newDelta}`
-                : newDelta;
+            const newText = data.text;
+            const isFinal = data.is_final || false;
 
-              cumulativeMediumRef.current = newCumulative;
-              setMediumTranscript(newCumulative);
+            // ✅ Update the correct state based on mode
+            if (isCollaborative) {
+              // HOST in collaborative mode - use liveTranscript
+              if (!isFinal) {
+                setInterimText(newText);
+              } else {
+                setLiveTranscript((prev) =>
+                  prev ? `${prev} ${newText}` : newText,
+                );
+                setInterimText("");
+              }
+            } else {
+              // Solo mode - use realtimeText
+              if (!isFinal) {
+                setInterimText(newText);
+              } else {
+                setRealtimeText((prev) =>
+                  prev ? `${prev} ${newText}` : newText,
+                );
+                setInterimText("");
+              }
+            }
+            setStats((prev) => ({ ...prev, tiny: prev.tiny + 1 }));
+
+            // 🚨 NEW: Broadcast to participants in collaborative mode
+            if (isCollaborative && isFinal) {
+              // Send via backend WebSocket for broadcast to participants
+              if (
+                wsConnectionRef.current &&
+                wsConnectionRef.current.readyState === WebSocket.OPEN
+              ) {
+                wsConnectionRef.current.send(
+                  JSON.stringify({
+                    type: "host_transcription",
+                    data: {
+                      text: newText,
+                      is_final: isFinal,
+                      source: "deepgram",
+                    },
+                  }),
+                );
+              }
+            }
+          } else if (data.type === "medium_delta") {
+            const mediumText = data.text.trim();
+            if (mediumText) {
+              // ✅ Update the correct state based on mode
+              if (isCollaborative) {
+                // HOST in collaborative mode - use liveTranscript
+                setLiveTranscript((prev) =>
+                  prev ? `${prev} ${mediumText}` : mediumText,
+                );
+                setInterimText("");
+              } else {
+                // Solo mode - use realtimeText
+                setRealtimeText((prev) =>
+                  prev ? `${prev} ${mediumText}` : mediumText,
+                );
+                setInterimText("");
+              }
               setStats((prev) => ({ ...prev, medium: prev.medium + 1 }));
 
-              // DON'T clear Deepgram here - let it keep showing real-time text
-              // setDeepgramText("");  // ← REMOVE THIS LINE
+              // 🚨 NEW: Broadcast to participants in collaborative mode
+              if (isCollaborative) {
+                if (
+                  wsConnectionRef.current &&
+                  wsConnectionRef.current.readyState === WebSocket.OPEN
+                ) {
+                  wsConnectionRef.current.send(
+                    JSON.stringify({
+                      type: "host_transcription",
+                      data: {
+                        text: mediumText,
+                        is_final: true,
+                        source: "medium",
+                      },
+                    }),
+                  );
+                }
+              }
             }
           } else if (data.type === "large_result") {
-            setLargeText(data.text);
+            const largeText = data.text;
+
+            // ✅ Update the correct state based on mode
+            if (isCollaborative) {
+              setLiveTranscript(largeText);
+            } else {
+              setRealtimeText(largeText);
+            }
+            setInterimText("");
             setIsProcessingLarge(false);
             setStats((prev) => ({ ...prev, large: prev.large + 1 }));
 
-            setMediumTranscript("");
-            setDeepgramText("");
-            cumulativeMediumRef.current = "";
-
-            if (wsRef.current && (wsRef.current as any).__fallbackTimeout) {
-              clearTimeout((wsRef.current as any).__fallbackTimeout);
+            // 🚨 NEW: Broadcast final result to participants
+            if (isCollaborative) {
+              if (
+                wsConnectionRef.current &&
+                wsConnectionRef.current.readyState === WebSocket.OPEN
+              ) {
+                wsConnectionRef.current.send(
+                  JSON.stringify({
+                    type: "host_transcription",
+                    data: {
+                      text: largeText,
+                      is_final: true,
+                      source: "large",
+                    },
+                  }),
+                );
+              }
             }
-
             setTimeout(() => {
               closeWebSocket();
             }, 500);
@@ -735,7 +942,11 @@ registerProcessor('audio-processor', AudioProcessor);
                   type: "audio/wav",
                 });
 
-                processRealtimeComplete(audioBlob)
+                processRealtimeCompleteWithCollaboration(
+                  audioBlob,
+                  isCollaborative,
+                  currentMeetingId || undefined,
+                )
                   .then(async (analysisResult) => {
                     console.log(
                       "✅ Analysis complete, navigating to results...",
@@ -743,10 +954,8 @@ registerProcessor('audio-processor', AudioProcessor);
                     setActiveAnalysis(analysisResult);
                     setActiveAudioFile(audioBlob);
 
-                    // Refresh meeting history from database
                     await refreshMeetingHistory();
 
-                    // Navigate to dashboard view and show analysis
                     setCurrentView("dashboard");
                     setMeetingState(MeetingState.ANALYSIS_READY);
                     setSuccess("Meeting analysis complete!");
@@ -770,14 +979,11 @@ registerProcessor('audio-processor', AudioProcessor);
             }
           } else if (data.type === "error") {
             setRealtimeError(data.message || "Transcription error");
-          } else if (data.type === "pong") {
-            // Keep-alive
           }
         } catch (e) {
           console.error("Error parsing WebSocket message:", e);
         }
       };
-      // ============ END FIX ============
 
       ws.onerror = (error) => {
         console.error("WebSocket error:", error);
@@ -790,7 +996,6 @@ registerProcessor('audio-processor', AudioProcessor);
       ws.onclose = (event) => {
         console.log("WebSocket closed:", event.code, event.reason);
 
-        // If closed while recording → error
         if (isListening && !isProcessingLarge) {
           setRealtimeError("Connection lost during recording.");
           stopListening();
@@ -804,10 +1009,18 @@ registerProcessor('audio-processor', AudioProcessor);
       setIsListening(false);
     }
   };
+
   const stopListening = async () => {
+    if (
+      streamingWsRef.current &&
+      streamingWsRef.current.readyState === WebSocket.OPEN
+    ) {
+      console.log("🛑 Stopping streaming...");
+      stopStreaming(streamingWsRef.current);
+      streamingWsRef.current = null;
+    }
     setIsListening(false);
     setIsProcessingLarge(true);
-
     if (
       mediaRecorderRef.current &&
       mediaRecorderRef.current.state !== "inactive"
@@ -854,154 +1067,15 @@ registerProcessor('audio-processor', AudioProcessor);
       streamRef.current = null;
     }
   };
-  // const processRecordedAudio = async () => {
-  //   try {
-  //     // Use the large text that was already transcribed in real-time
-  //     const finalTranscript = largeText || mediumTranscript || deepgramText;
-
-  //     if (!finalTranscript || finalTranscript.trim().length === 0) {
-  //       setRealtimeError("No transcript available for analysis");
-  //       setIsProcessingLarge(false);
-  //       return;
-  //     }
-
-  //     // Show processing state
-  //     setCurrentView("dashboard");
-  //     setMeetingState(MeetingState.PROCESSING);
-  //     setError(null);
-
-  //     // Analyze the transcript that was already generated
-  //     const analysisResult = await analyzeTranscript(finalTranscript);
-
-  //     // Parse diarized transcript
-  //     const parsedTranscript = parseTranscriptToSegments(
-  //       analysisResult.diarizedTranscript || finalTranscript || "",
-  //     );
-
-  //     // Create final result
-  //     const finalResult: AnalysisResult = {
-  //       summary: analysisResult.summary || "No summary available.",
-  //       sentiment: analysisResult.sentiment || {
-  //         overall: "Neutral",
-  //         highlights: [],
-  //       },
-  //       emotionAnalysis: analysisResult.emotionAnalysis || [],
-  //       actionItems: analysisResult.actionItems || [],
-  //       keyDecisions: analysisResult.keyDecisions || [],
-  //       diarizedTranscript: parsedTranscript,
-  //     };
-
-  //     // Set active analysis and save to history
-  //     setActiveAnalysis(finalResult);
-  //     // Meeting is already saved to DB by backend - just refresh
-  //     await refreshMeetingHistory();
-  //     setMeetingState(MeetingState.ANALYSIS_READY);
-  //     setIsProcessingLarge(false);
-  //   } catch (err) {
-  //     console.error("Processing error:", err);
-  //     setError(
-  //       err instanceof Error
-  //         ? err.message
-  //         : "An unexpected error occurred during processing.",
-  //     );
-  //     setMeetingState(MeetingState.ERROR);
-  //     setIsProcessingLarge(false);
-  //   }
-  // };
-
-  // const processRecordedAudio = async () => {
-  //   try {
-  //     if (recordedAudioChunksRef.current.length === 0) {
-  //       setRealtimeError("No audio data recorded");
-  //       setIsProcessingLarge(false);
-  //       return;
-  //     }
-
-  //     // Create blob from recorded chunks
-  //     const audioBlob = new Blob(recordedAudioChunksRef.current, {
-  //       type: mediaRecorderRef.current?.mimeType || "audio/webm",
-  //     });
-
-  //     // Convert to base64
-  //     const reader = new FileReader();
-  //     reader.readAsDataURL(audioBlob);
-
-  //     reader.onloadend = async () => {
-  //       try {
-  //         const base64String = (reader.result as string).split(",")[1];
-  //         const mimeType = audioBlob.type;
-
-  //         // Show processing state
-  //         setCurrentView("dashboard");
-  //         setMeetingState(MeetingState.PROCESSING);
-  //         setError(null);
-
-  //         // Transcribe audio
-  //         const transcript = await transcribeAudio(base64String, mimeType);
-
-  //         // Analyze transcript
-  //         const analysisResult = await analyzeTranscript(transcript);
-
-  //         // Parse diarized transcript
-  //         const parsedTranscript = parseTranscriptToSegments(
-  //           analysisResult.diarizedTranscript || transcript,
-  //         );
-
-  //         // Create final result
-  //         const finalResult: AnalysisResult = {
-  //           summary: analysisResult.summary || "No summary available.",
-  //           sentiment: analysisResult.sentiment || {
-  //             overall: "Neutral",
-  //             highlights: [],
-  //           },
-  //           emotionAnalysis: analysisResult.emotionAnalysis || [],
-  //           actionItems: analysisResult.actionItems || [],
-  //           keyDecisions: analysisResult.keyDecisions || [],
-  //           diarizedTranscript: parsedTranscript,
-  //         };
-
-  //         // Set active analysis and save to history
-  //         setActiveAnalysis(finalResult);
-  //         saveMeetingToHistory(finalResult);
-  //         setMeetingState(MeetingState.ANALYSIS_READY);
-  //         setIsProcessingLarge(false);
-  //       } catch (err) {
-  //         console.error("Processing error:", err);
-  //         setError(
-  //           err instanceof Error
-  //             ? err.message
-  //             : "An unexpected error occurred during processing.",
-  //         );
-  //         setMeetingState(MeetingState.ERROR);
-  //         setIsProcessingLarge(false);
-  //       }
-  //     };
-
-  //     reader.onerror = () => {
-  //       setError("Failed to process the recorded audio.");
-  //       setMeetingState(MeetingState.ERROR);
-  //       setIsProcessingLarge(false);
-  //     };
-  //   } catch (err) {
-  //     console.error("Recording processing error:", err);
-  //     setError(
-  //       err instanceof Error ? err.message : "Failed to process the recording.",
-  //     );
-  //     setMeetingState(MeetingState.ERROR);
-  //     setIsProcessingLarge(false);
-  //   }
-  // };
 
   const copyToClipboard = () => {
-    const textToCopy = largeText || mediumTranscript || deepgramText;
-    navigator.clipboard.writeText(textToCopy);
+    navigator.clipboard.writeText(realtimeText);
     setSuccess("Copied to clipboard!");
     setTimeout(() => setSuccess(""), 3000);
   };
 
   const downloadTranscript = () => {
-    const textToDownload = largeText || mediumTranscript || deepgramText;
-    const blob = new Blob([textToDownload], { type: "text/plain" });
+    const blob = new Blob([realtimeText], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -1015,10 +1089,7 @@ registerProcessor('audio-processor', AudioProcessor);
   };
 
   const clearTranscript = () => {
-    setDeepgramText("");
-    setMediumTranscript("");
-    setLargeText("");
-    cumulativeMediumRef.current = "";
+    setRealtimeText("");
     setStats({ tiny: 0, medium: 0, large: 0 });
     setSuccess("Transcript cleared!");
     setTimeout(() => setSuccess(""), 3000);
@@ -1030,9 +1101,27 @@ registerProcessor('audio-processor', AudioProcessor);
     const secs = seconds % 60;
     return `${hrs.toString().padStart(2, "0")}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   };
-
+  const joinLiveMeeting = async (meetingId: string) => {
+    try {
+      setCurrentMeetingId(meetingId);
+      setIsCollaborative(true);
+      setIsHost(false);
+      setCurrentView("realtime");
+      setRealtimeText("");
+      setRealtimeError("");
+      setSuccess("");
+      setRecordingDuration(0);
+      setStats({ tiny: 0, medium: 0, large: 0 });
+      setSequenceNumber(0);
+      lastPolledSequenceRef.current = 0;
+      setIsListening(true);
+    } catch (err) {
+      console.error("Error joining meeting:", err);
+      setError("Failed to join meeting");
+    }
+  };
   const renderRealtimePage = () => {
-    const hasTranscript = !!(deepgramText || mediumTranscript || largeText);
+    const hasTranscript = !!realtimeText;
 
     return (
       <div className="min-h-screen bg-gray-900 text-white flex flex-col">
@@ -1049,9 +1138,25 @@ registerProcessor('audio-processor', AudioProcessor);
             <div className="flex items-center gap-3">
               <ParotLogo className="w-8 h-8" />
               <span className="text-xl font-bold">parot</span>
+              {isCollaborative && (
+                <span className="text-sm bg-cyan-600 px-3 py-1 rounded-full">
+                  Collaborative
+                </span>
+              )}
             </div>
 
             <div className="flex items-center gap-4">
+              {isCollaborative && isHost && (
+                <button
+                  onClick={() =>
+                    setShowParticipantsPanel(!showParticipantsPanel)
+                  }
+                  className="flex items-center gap-2 px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+                >
+                  <Users size={18} />
+                  <span>Participants</span>
+                </button>
+              )}
               <div className="flex items-center gap-2 text-sm">
                 {backendStatus === "connected" ? (
                   <>
@@ -1074,7 +1179,7 @@ registerProcessor('audio-processor', AudioProcessor);
           </div>
         </header>
 
-        <div className="flex-1 container mx-auto p-4 flex flex-col">
+        <div className="flex-1 container mx-auto p-4 flex gap-4">
           <div className="flex-1 flex flex-col max-w-5xl mx-auto w-full">
             {(realtimeError || success) && (
               <div className="mb-4">
@@ -1100,18 +1205,19 @@ registerProcessor('audio-processor', AudioProcessor);
                 </div>
                 <div className="text-sm text-gray-400">
                   {isListening ? "Recording..." : "Ready to record"}
+                  {isCollaborative && ` • ${isHost ? "Host" : "Participant"}`}
                 </div>
               </div>
 
               <div className="flex gap-4 mb-6">
                 <button
                   onClick={isListening ? stopListening : startListening}
-                  disabled={isProcessingLarge}
+                  disabled={isProcessingLarge || (!isHost && isCollaborative)}
                   className={`flex items-center justify-center gap-3 px-8 py-4 rounded-full font-bold text-lg transition-all shadow-lg ${
                     isListening
                       ? "bg-red-600 hover:bg-red-700"
                       : "bg-cyan-600 hover:bg-cyan-700"
-                  } ${isProcessingLarge ? "opacity-50 cursor-not-allowed" : ""}`}
+                  } ${isProcessingLarge || (!isHost && isCollaborative) ? "opacity-50 cursor-not-allowed" : ""}`}
                 >
                   {isProcessingLarge ? (
                     <>
@@ -1126,7 +1232,9 @@ registerProcessor('audio-processor', AudioProcessor);
                   ) : (
                     <>
                       <MicIcon className="w-6 h-6" />
-                      Start Recording
+                      {isHost || !isCollaborative
+                        ? "Start Recording"
+                        : "Waiting for host..."}
                     </>
                   )}
                 </button>
@@ -1143,7 +1251,6 @@ registerProcessor('audio-processor', AudioProcessor);
                 </div>
               )}
 
-              {/* ── Live Spectrogram ─────────────────────────────────── */}
               <div className="w-full mt-5">
                 <Spectrogram
                   stream={streamRef.current}
@@ -1158,7 +1265,7 @@ registerProcessor('audio-processor', AudioProcessor);
               <div className="flex gap-6 text-xs text-gray-500 mt-4">
                 <div className="flex items-center gap-2">
                   <Zap size={14} className="text-cyan-400" />
-                  <span>Tiny: {stats.tiny}</span>
+                  <span>Deepgram: {stats.tiny}</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <Zap size={14} className="text-blue-400" />
@@ -1172,62 +1279,30 @@ registerProcessor('audio-processor', AudioProcessor);
             </div>
 
             <div className="flex-1 bg-gray-800 rounded-lg p-6 overflow-y-auto">
-              {hasTranscript ? (
+              {/* Check if there's any transcript to show */}
+              {(isHost ? liveTranscript : realtimeText) || interimText ? (
                 <div className="space-y-4">
-                  <p className="text-gray-300 leading-relaxed whitespace-pre-wrap">
+                  <div className="text-gray-300 leading-relaxed whitespace-pre-wrap">
                     {isProcessingLarge && (
                       <span className="inline-flex items-center gap-2 text-purple-400 mb-2">
                         <LoaderIcon className="w-4 h-4 animate-spin" />
                         Final polish in progress...
                       </span>
                     )}
-                    {largeText ? (
-                      <>
-                        <span className="text-purple-400 font-semibold">
-                          [Final - Large Model]
-                        </span>
-                        <br />
-                        {largeText}
-                      </>
-                    ) : (
-                      <>
-                        {/* Show Medium (refined) first */}
-                        {mediumTranscript && (
-                          <>
-                            <span className="text-blue-400 font-semibold">
-                              [Refined]
-                            </span>{" "}
-                            <span className="text-blue-400 font-medium">
-                              {mediumTranscript}
-                            </span>
-                          </>
-                        )}
 
-                        {/* Show Deepgram (real-time) after Medium */}
-                        {deepgramText && (
-                          <>
-                            {mediumTranscript && " "}
-                            <span className="text-cyan-400 font-semibold">
-                              {mediumTranscript
-                                ? "[Live]"
-                                : "[Live - Deepgram]"}
-                            </span>{" "}
-                            <span className="text-cyan-400 italic">
-                              {deepgramText}
-                            </span>
-                            {isListening && (
-                              <span className="inline-block w-2 h-4 bg-cyan-400 ml-1 animate-pulse" />
-                            )}
-                          </>
-                        )}
+                    {/* Final transcript - HOST shows liveTranscript, PARTICIPANT shows realtimeText */}
+                    <p className="text-gray-200">
+                      {isHost ? liveTranscript : realtimeText}
+                      {isListening && !isProcessingLarge && (
+                        <span className="inline-block w-2 h-4 bg-cyan-400 ml-1 animate-pulse" />
+                      )}
+                    </p>
 
-                        {/* Fallback if nothing is showing */}
-                        {!mediumTranscript && !deepgramText && isListening && (
-                          <span className="text-gray-500">Listening...</span>
-                        )}
-                      </>
+                    {/* Interim text (gray/italic) - shown for both HOST and PARTICIPANT */}
+                    {interimText && (
+                      <p className="text-gray-500 italic mt-2">{interimText}</p>
                     )}
-                  </p>
+                  </div>
                 </div>
               ) : (
                 <div className="flex flex-col items-center justify-center h-full text-gray-500 text-center py-8">
@@ -1236,12 +1311,17 @@ registerProcessor('audio-processor', AudioProcessor);
                   <p className="text-sm mt-2">
                     Ultra-fast: Deepgram • Refined: Medium • Final: Large
                   </p>
+                  {isCollaborative && !isHost && (
+                    <p className="text-sm mt-2 text-cyan-400">
+                      ✨ You'll see live updates as the host speaks
+                    </p>
+                  )}
                 </div>
               )}
             </div>
 
             {hasTranscript && (
-              <div className="flex gap-2 mb-4">
+              <div className="flex gap-2 mt-4">
                 <button
                   onClick={copyToClipboard}
                   className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg transition-colors font-medium"
@@ -1265,7 +1345,7 @@ registerProcessor('audio-processor', AudioProcessor);
               </div>
             )}
 
-            <div className="text-center text-sm text-gray-500 space-y-1">
+            <div className="text-center text-sm text-gray-500 space-y-1 mt-4">
               <p>⚡ Deepgram: Ultra-fast real-time (200-400ms latency)</p>
               <p>🔄 Medium: Whisper cumulative refinements every 5s</p>
               <p>🎯 Large: Whisper final high-quality polish</p>
@@ -1276,6 +1356,22 @@ registerProcessor('audio-processor', AudioProcessor);
               )}
             </div>
           </div>
+
+          {/* Participants Panel */}
+          {isCollaborative &&
+            isHost &&
+            showParticipantsPanel &&
+            currentMeetingId && (
+              <div className="w-80 flex-shrink-0">
+                <ParticipantsPanel
+                  meetingId={currentMeetingId}
+                  isHost={isHost}
+                  onParticipantsChange={() => {
+                    // Refresh if needed
+                  }}
+                />
+              </div>
+            )}
         </div>
       </div>
     );
@@ -1328,6 +1424,19 @@ registerProcessor('audio-processor', AudioProcessor);
       default:
         return (
           <div className="flex flex-col items-center justify-center h-full w-full text-center">
+            {/* Invitations at the top */}
+            <div className="w-full max-w-4xl mb-8">
+              <InvitationsList
+                onInvitationResponse={(meetingId?: string) => {
+                  if (meetingId) {
+                    joinLiveMeeting(meetingId);
+                  } else {
+                    refreshMeetingHistory();
+                  }
+                }}
+              />
+            </div>
+
             <div className="mb-12">
               <ParotLogo className="w-24 h-24 mx-auto mb-4" />
               <h1 className="text-5xl md:text-6xl font-extrabold mb-4 tracking-tight">
@@ -1340,11 +1449,18 @@ registerProcessor('audio-processor', AudioProcessor);
               </p>
               <div className="flex flex-col sm:flex-row gap-4 justify-center">
                 <button
-                  onClick={handleStartRealtimeMeeting}
+                  onClick={() => handleStartRealtimeMeeting(false)}
                   className="flex items-center justify-center px-8 py-4 bg-cyan-600 text-white font-bold rounded-full hover:bg-cyan-700 transition-transform hover:scale-105 shadow-lg"
                 >
                   <MicIcon className="w-6 h-6 mr-2" />
                   Start New Meeting
+                </button>
+                <button
+                  onClick={() => handleStartRealtimeMeeting(true)}
+                  className="flex items-center justify-center px-8 py-4 bg-purple-600 text-white font-bold rounded-full hover:bg-purple-700 transition-transform hover:scale-105 shadow-lg"
+                >
+                  <Users className="w-6 h-6 mr-2" />
+                  Start Collaborative Meeting
                 </button>
                 <label
                   htmlFor="audio-upload"
@@ -1386,9 +1502,16 @@ registerProcessor('audio-processor', AudioProcessor);
                         onClick={() => handleSelectHistory(meeting.id)}
                         className="flex-grow text-left"
                       >
-                        <p className="font-semibold text-white">
-                          {meeting.title}
-                        </p>
+                        <div className="flex items-center gap-2">
+                          <p className="font-semibold text-white">
+                            {meeting.title}
+                          </p>
+                          {meeting.is_collaborative && (
+                            <span className="text-xs bg-purple-600 px-2 py-1 rounded-full">
+                              Collaborative
+                            </span>
+                          )}
+                        </div>
                         <p className="text-sm text-gray-400">
                           {new Date(meeting.created_at).toLocaleString()}
                         </p>

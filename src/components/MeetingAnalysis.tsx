@@ -61,7 +61,59 @@ const MeetingAnalysis: React.FC<MeetingAnalysisProps> = ({
     setIsTranslating(false);
     setChatMessages([]); // Reset chat when a new result is loaded
   }, [result]);
+  // Add WebSocket connection for collaborative meetings
+  useEffect(() => {
+    if (!result.meetingId || !result.isCollaborative) return;
 
+    const ws = new WebSocket(
+      `ws://localhost:8000/ws/meetings/${result.meetingId}`,
+    );
+
+    ws.onopen = () => {
+      console.log("WebSocket connected");
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+
+        if (message.type === "analysis_complete") {
+          // Update the result with completed analysis
+          setCurrentResult((prev) => ({
+            ...prev,
+            ...message.data.analysis,
+            spectrogramUrl: message.data.spectrogramUrl,
+          }));
+          console.log("Received analysis completion");
+        } else if (message.type === "transcript_update") {
+          // Handle real-time transcript updates if needed
+          console.log("Received transcript update:", message.data);
+        }
+      } catch (error) {
+        console.error("WebSocket message error:", error);
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error("WebSocket error:", error);
+    };
+
+    ws.onclose = () => {
+      console.log("WebSocket disconnected");
+    };
+
+    // Send ping to keep connection alive
+    const pingInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send("ping");
+      }
+    }, 30000);
+
+    return () => {
+      clearInterval(pingInterval);
+      ws.close();
+    };
+  }, [result.meetingId, result.isCollaborative]);
   const handleTranslate = async (targetLanguage: string) => {
     if (targetLanguage === "original") {
       setCurrentResult(result);
